@@ -8,7 +8,27 @@ function base64url(str) {
 }
 
 async function getGoogleAccessToken() {
-  const key = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+  const rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+  if (!rawKey) throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY environment variable is not set');
+
+  let key;
+  try {
+    key = JSON.parse(rawKey);
+  } catch (e) {
+    // Sometimes Netlify wraps the value in extra quotes — try stripping them
+    try {
+      key = JSON.parse(rawKey.trim().replace(/^"|"$/g, ''));
+    } catch (e2) {
+      throw new Error('Failed to parse GOOGLE_SERVICE_ACCOUNT_KEY — check that the full JSON was pasted correctly in Netlify env vars');
+    }
+  }
+
+  if (!key.private_key || !key.client_email) {
+    throw new Error('Service account key is missing private_key or client_email fields');
+  }
+
+  // Ensure private key newlines are correct (Netlify sometimes collapses \\n to literal \n)
+  const privateKey = key.private_key.replace(/\\n/g, '\n');
   const now = Math.floor(Date.now() / 1000);
   const header = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
   const claim = base64url(JSON.stringify({
@@ -22,7 +42,7 @@ async function getGoogleAccessToken() {
   const { createSign } = require('crypto');
   const sign = createSign('RSA-SHA256');
   sign.update(`${header}.${claim}`);
-  const sig = sign.sign(key.private_key, 'base64')
+  const sig = sign.sign(privateKey, 'base64')
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
   const jwt = `${header}.${claim}.${sig}`;
 
@@ -68,10 +88,10 @@ function driveRequest(path, token) {
 }
 
 async function listFolder(folderId, token) {
-  const q = encodeURIComponent(`parentId = '${folderId}'`);
+  const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
   const fields = encodeURIComponent('files(id,name,mimeType,size,createdTime,modifiedTime)');
   const result = await driveRequest(
-    `/drive/v3/files?q=${q}&fields=${fields}&pageSize=50&supportsAllDrives=true`,
+    `/drive/v3/files?q=${q}&fields=${fields}&pageSize=50`,
     token
   );
   return result.files || [];
@@ -152,7 +172,7 @@ exports.handler = async (event) => {
 
     // ── 2. Find transaction folder by last name ─────────────────────────────
     const q = encodeURIComponent(
-      `'${RE_TRANSACTIONS_FOLDER}' in parents and name contains '${lastNameSearch}' and mimeType = 'application/vnd.google-apps.folder'`
+      `'${RE_TRANSACTIONS_FOLDER}' in parents and name contains '${lastNameSearch}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
     );
     const searchResult = await driveRequest(
       `/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=10`,
@@ -259,10 +279,11 @@ exports.handler = async (event) => {
     };
 
   } catch (err) {
-    console.error(err);
+    console.error('Audit function error:', err.message, err.stack);
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: err.message })
+      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+      body: JSON.stringify({ error: err.message || 'Unknown error in audit function' })
     };
   }
 };
@@ -427,4 +448,3 @@ function callClaude(prompt) {
     req.end();
   });
 }
-
