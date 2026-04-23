@@ -1,1 +1,9 @@
+[build]
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+[functions."audit"]
+  timeout = 30
 
