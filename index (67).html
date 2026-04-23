@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SZREG AI Pre-Audit Tool</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --navy: #0a1628;
+    --navy-mid: #112040;
+    --navy-light: #1a3060;
+    --gold: #c9a84c;
+    --gold-light: #e8d89a;
+    --gold-pale: #f9f6ee;
+    --white: #ffffff;
+    --gray-100: #f7f7f7;
+    --gray-200: #e8e8e8;
+    --gray-400: #999999;
+    --gray-600: #555555;
+    --gray-800: #222222;
+    --red: #c0392b;
+    --red-light: #fdf0ef;
+    --yellow: #d4860a;
+    --yellow-light: #fef9ee;
+    --green: #1e7a4b;
+    --green-light: #edf7f2;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--navy);
+    font-family: 'DM Sans', sans-serif;
+    color: var(--gray-800);
+    min-height: 100vh;
+  }
+
+  /* ── Header ── */
+  .header {
+    background: var(--navy);
+    padding: 20px 32px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    border-bottom: 1px solid rgba(201,168,76,0.2);
+  }
+  .logo-box {
+    border: 2px solid var(--gold);
+    padding: 6px 10px;
+    font-family: 'Playfair Display', serif;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--gold);
+    letter-spacing: 2px;
+    flex-shrink: 0;
+  }
+  .header-text { flex: 1; }
+  .header-title {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--white);
+    letter-spacing: 0.3px;
+  }
+  .header-sub {
+    font-size: 10px;
+    color: var(--gold);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    margin-top: 2px;
+  }
+  .header-badge {
+    background: rgba(201,168,76,0.12);
+    border: 1px solid rgba(201,168,76,0.3);
+    color: var(--gold);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    padding: 5px 12px;
+    border-radius: 2px;
+  }
+
+  /* ── Main layout ── */
+  .main {
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 32px 20px 60px;
+  }
+
+  /* ── Section title ── */
+  .section-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--white);
+    margin-bottom: 4px;
+  }
+  .section-sub {
+    font-size: 13px;
+    color: rgba(255,255,255,0.45);
+    margin-bottom: 28px;
+    letter-spacing: 0.2px;
+  }
+
+  /* ── Card ── */
+  .card {
+    background: var(--white);
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 16px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+  }
+  .card-header {
+    background: var(--navy-mid);
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .card-header-icon {
+    width: 28px;
+    height: 28px;
+    background: rgba(201,168,76,0.15);
+    border: 1px solid rgba(201,168,76,0.3);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+  }
+  .card-header-title {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--gold);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+  .card-body {
+    padding: 24px;
+  }
+
+  /* ── Form fields ── */
+  .field-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  .field-row.full { grid-template-columns: 1fr; }
+  .field-row.three { grid-template-columns: 1fr 1fr 1fr; }
+
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--gray-600);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+  .field input, .field select {
+    border: 1.5px solid var(--gray-200);
+    border-radius: 4px;
+    padding: 10px 14px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    color: var(--gray-800);
+    background: var(--white);
+    transition: border-color 0.15s;
+    outline: none;
+    -webkit-appearance: none;
+  }
+  .field input:focus, .field select:focus {
+    border-color: var(--gold);
+  }
+  .field .hint {
+    font-size: 11px;
+    color: var(--gray-400);
+    margin-top: -2px;
+  }
+
+  /* ── Toggle group ── */
+  .toggle-group {
+    display: flex;
+    border: 1.5px solid var(--gray-200);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .toggle-group input[type="radio"] { display: none; }
+  .toggle-group label {
+    flex: 1;
+    text-align: center;
+    padding: 10px 8px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--gray-600);
+    cursor: pointer;
+    transition: all 0.15s;
+    letter-spacing: 0;
+    text-transform: none;
+    border: none;
+  }
+  .toggle-group label:not(:last-child) {
+    border-right: 1.5px solid var(--gray-200);
+  }
+  .toggle-group input[type="radio"]:checked + label {
+    background: var(--navy);
+    color: var(--white);
+    font-weight: 600;
+  }
+  .toggle-group.type input[type="radio"]:checked + label {
+    background: var(--navy);
+    color: var(--gold);
+  }
+
+  /* ── Conditionals grid ── */
+  .conditionals {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .conditional-item {
+    border: 1.5px solid var(--gray-200);
+    border-radius: 4px;
+    padding: 12px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .conditional-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--gray-800);
+  }
+  .conditional-label span {
+    display: block;
+    font-size: 11px;
+    color: var(--gray-400);
+    font-weight: 400;
+    margin-top: 2px;
+  }
+  .mini-toggle {
+    display: flex;
+    border: 1.5px solid var(--gray-200);
+    border-radius: 3px;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .mini-toggle input[type="radio"] { display: none; }
+  .mini-toggle label {
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--gray-600);
+    cursor: pointer;
+    transition: all 0.15s;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .mini-toggle label:first-of-type { border-right: 1.5px solid var(--gray-200); }
+  .mini-toggle input[type="radio"]:checked + label {
+    background: var(--navy);
+    color: var(--white);
+  }
+
+  /* ── Submit button ── */
+  .submit-btn {
+    width: 100%;
+    background: var(--gold);
+    color: var(--navy);
+    border: none;
+    padding: 16px 32px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-top: 8px;
+  }
+  .submit-btn:hover { background: #b8973f; }
+  .submit-btn:disabled {
+    background: var(--gray-200);
+    color: var(--gray-400);
+    cursor: not-allowed;
+  }
+
+  /* ── Status bar ── */
+  .status-bar {
+    border-radius: 4px;
+    padding: 14px 20px;
+    margin-top: 16px;
+    display: none;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .status-bar.loading {
+    display: flex;
+    background: rgba(201,168,76,0.1);
+    border: 1px solid rgba(201,168,76,0.25);
+    color: var(--gold);
+  }
+  .status-bar.error {
+    display: flex;
+    background: var(--red-light);
+    border: 1px solid #f0c0bc;
+    color: var(--red);
+  }
+  .spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid rgba(201,168,76,0.3);
+    border-top-color: var(--gold);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Report output ── */
+  #report-output { display: none; margin-top: 24px; }
+
+  .report-header {
+    background: var(--navy-mid);
+    border-radius: 6px 6px 0 0;
+    padding: 20px 28px;
+    border-bottom: 2px solid var(--gold);
+  }
+  .report-folder {
+    font-family: 'Playfair Display', serif;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--white);
+    margin-bottom: 4px;
+  }
+  .report-meta {
+    font-size: 12px;
+    color: rgba(255,255,255,0.5);
+    letter-spacing: 0.5px;
+  }
+  .report-meta strong { color: var(--gold); }
+
+  .risk-banner {
+    padding: 14px 28px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .risk-banner.HIGH { background: #fdf0ef; color: var(--red); border-bottom: 1px solid #f0c0bc; }
+  .risk-banner.MEDIUM { background: var(--yellow-light); color: var(--yellow); border-bottom: 1px solid #f0d090; }
+  .risk-banner.LOW { background: var(--green-light); color: var(--green); border-bottom: 1px solid #b0dfc4; }
+
+  .report-summary {
+    background: var(--white);
+    padding: 20px 28px;
+    font-size: 14px;
+    color: var(--gray-600);
+    line-height: 1.7;
+    border-bottom: 1px solid var(--gray-200);
+  }
+
+  .report-section {
+    background: var(--white);
+  }
+  .report-section-header {
+    padding: 14px 28px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--gray-200);
+  }
+  .report-section-header.red { color: var(--red); background: var(--red-light); }
+  .report-section-header.yellow { color: var(--yellow); background: var(--yellow-light); }
+  .report-section-header.green { color: var(--green); background: var(--green-light); }
+
+  .report-item {
+    padding: 14px 28px;
+    border-bottom: 1px solid var(--gray-200);
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+  }
+  .report-item:last-child { border-bottom: none; }
+  .report-item-icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
+  .report-item-content { flex: 1; }
+  .report-item-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--gray-800);
+    margin-bottom: 3px;
+  }
+  .report-item-detail {
+    font-size: 12px;
+    color: var(--gray-600);
+    line-height: 1.5;
+  }
+  .report-item-folder {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--gray-400);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-top: 4px;
+  }
+
+  .report-disclaimer {
+    background: var(--gray-100);
+    padding: 16px 28px;
+    font-size: 11px;
+    color: var(--gray-400);
+    line-height: 1.6;
+    border-radius: 0 0 6px 6px;
+    border-top: 1px solid var(--gray-200);
+  }
+
+  .score-row {
+    display: flex;
+    gap: 12px;
+    padding: 16px 28px;
+    background: var(--white);
+    border-bottom: 1px solid var(--gray-200);
+  }
+  .score-pill {
+    flex: 1;
+    border-radius: 4px;
+    padding: 10px 12px;
+    text-align: center;
+  }
+  .score-pill.red { background: var(--red-light); border: 1px solid #f0c0bc; }
+  .score-pill.yellow { background: var(--yellow-light); border: 1px solid #f0d090; }
+  .score-pill.green { background: var(--green-light); border: 1px solid #b0dfc4; }
+  .score-pill .num {
+    font-family: 'Playfair Display', serif;
+    font-size: 22px;
+    font-weight: 700;
+    display: block;
+  }
+  .score-pill.red .num { color: var(--red); }
+  .score-pill.yellow .num { color: var(--yellow); }
+  .score-pill.green .num { color: var(--green); }
+  .score-pill .lbl {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--gray-400);
+    margin-top: 2px;
+    display: block;
+  }
+
+  /* ── Folder inventory ── */
+  .inventory-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    padding: 16px 28px;
+    background: var(--white);
+    border-bottom: 1px solid var(--gray-200);
+  }
+  .inv-cell {
+    background: var(--gray-100);
+    border-radius: 4px;
+    padding: 10px 8px;
+    text-align: center;
+  }
+  .inv-cell .inv-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: var(--gray-400);
+    text-transform: uppercase;
+    display: block;
+    margin-bottom: 4px;
+  }
+  .inv-cell .inv-count {
+    font-family: 'Playfair Display', serif;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--navy);
+    display: block;
+  }
+  .inv-cell .inv-files {
+    font-size: 10px;
+    color: var(--gray-400);
+    margin-top: 2px;
+  }
+
+  /* ── Footer ── */
+  .footer {
+    text-align: center;
+    padding: 24px;
+    font-size: 10px;
+    color: rgba(255,255,255,0.2);
+    letter-spacing: 1px;
+  }
+
+  @media (max-width: 600px) {
+    .field-row { grid-template-columns: 1fr; }
+    .field-row.three { grid-template-columns: 1fr 1fr; }
+    .conditionals { grid-template-columns: 1fr; }
+    .inventory-grid { grid-template-columns: repeat(3, 1fr); }
+    .score-row { flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo-box">SZ</div>
+  <div class="header-text">
+    <div class="header-title">SZ Real Estate Group</div>
+    <div class="header-sub">AI Pre-Audit Tool</div>
+  </div>
+  <div class="header-badge">Phase 5</div>
+</div>
+
+<div class="main">
+  <div class="section-title">Transaction Pre-Audit</div>
+  <div class="section-sub">Enter transaction details to run an AI compliance review of your E1–E5 executed documents.</div>
+
+  <!-- Card 1: Transaction Identity -->
+  <div class="card">
+    <div class="card-header">
+      <div class="card-header-icon">🏠</div>
+      <div class="card-header-title">Transaction Identity</div>
+    </div>
+    <div class="card-body">
+      <div class="field-row">
+        <div class="field">
+          <label>Client Last Name</label>
+          <input type="text" id="lastNameSearch" placeholder="e.g. Gustafson" autocomplete="off">
+          <div class="hint">Used to locate the Google Drive folder</div>
+        </div>
+        <div class="field">
+          <label>Transaction Type</label>
+          <div class="toggle-group type">
+            <input type="radio" name="txType" id="typeBuyer" value="BUYER" checked>
+            <label for="typeBuyer">Buyer File</label>
+            <input type="radio" name="txType" id="typeSeller" value="SELLER">
+            <label for="typeSeller">Seller File</label>
+          </div>
+        </div>
+      </div>
+      <div class="field-row three">
+        <div class="field">
+          <label>Year Built</label>
+          <input type="text" id="yearBuilt" placeholder="e.g. 1958" maxlength="4">
+          <div class="hint">Pre-1978 triggers Lead Paint</div>
+        </div>
+        <div class="field">
+          <label>Submitted By</label>
+          <select id="submittedBy">
+            <option value="Sam Zieour">Sam Zieour</option>
+            <option value="John Klein">John Klein</option>
+            <option value="TC / Admin">TC / Admin</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Audit Date</label>
+          <input type="text" id="auditDate" readonly>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 2: Property Conditions -->
+  <div class="card">
+    <div class="card-header">
+      <div class="card-header-icon">⚙️</div>
+      <div class="card-header-title">Property Conditions</div>
+    </div>
+    <div class="card-body">
+      <div class="conditionals">
+
+        <div class="conditional-item">
+          <div class="conditional-label">
+            HOA Present
+            <span>Triggers E5 document requirements</span>
+          </div>
+          <div class="mini-toggle">
+            <input type="radio" name="hoa" id="hoaNo" value="no" checked>
+            <label for="hoaNo">No</label>
+            <input type="radio" name="hoa" id="hoaYes" value="yes">
+            <label for="hoaYes">Yes</label>
+          </div>
+        </div>
+
+        <div class="conditional-item">
+          <div class="conditional-label">
+            Pool or Spa
+            <span>Triggers pool inspection requirement</span>
+          </div>
+          <div class="mini-toggle">
+            <input type="radio" name="pool" id="poolNo" value="no" checked>
+            <label for="poolNo">No</label>
+            <input type="radio" name="pool" id="poolYes" value="yes">
+            <label for="poolYes">Yes</label>
+          </div>
+        </div>
+
+        <div class="conditional-item">
+          <div class="conditional-label">
+            Dual Agency
+            <span>Triggers PRBS requirement</span>
+          </div>
+          <div class="mini-toggle">
+            <input type="radio" name="dual" id="dualNo" value="no" checked>
+            <label for="dualNo">No</label>
+            <input type="radio" name="dual" id="dualYes" value="yes">
+            <label for="dualYes">Yes</label>
+          </div>
+        </div>
+
+        <div class="conditional-item">
+          <div class="conditional-label">
+            55+ Community
+            <span>Triggers age verification requirement</span>
+          </div>
+          <div class="mini-toggle">
+            <input type="radio" name="c55" id="c55No" value="no" checked>
+            <label for="c55No">No</label>
+            <input type="radio" name="c55" id="c55Yes" value="yes">
+            <label for="c55Yes">Yes</label>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Submit -->
+  <button class="submit-btn" id="auditBtn" onclick="runAudit()">
+    Run AI Pre-Audit →
+  </button>
+
+  <!-- Status bar -->
+  <div class="status-bar" id="statusBar">
+    <div class="spinner"></div>
+    <span id="statusText">Connecting to Google Drive...</span>
+  </div>
+
+  <!-- Report Output -->
+  <div id="report-output">
+
+    <div class="report-header">
+      <div class="report-folder" id="rptFolder">—</div>
+      <div class="report-meta">
+        Audited by <strong id="rptBy">—</strong> &nbsp;·&nbsp;
+        <strong id="rptDate">—</strong> &nbsp;·&nbsp;
+        SZREG AI Pre-Audit System
+      </div>
+    </div>
+
+    <div class="risk-banner" id="rptRiskBanner">—</div>
+    <div class="report-summary" id="rptSummary">—</div>
+
+    <!-- Score pills -->
+    <div class="score-row">
+      <div class="score-pill red">
+        <span class="num" id="rptRedCount">0</span>
+        <span class="lbl">True Risk</span>
+      </div>
+      <div class="score-pill yellow">
+        <span class="num" id="rptYellowCount">0</span>
+        <span class="lbl">Manageable</span>
+      </div>
+      <div class="score-pill green">
+        <span class="num" id="rptGreenCount">0</span>
+        <span class="lbl">Clear</span>
+      </div>
+    </div>
+
+    <!-- Inventory grid -->
+    <div class="inventory-grid" id="rptInventory"></div>
+
+    <!-- True Risk -->
+    <div id="rptRedSection"></div>
+
+    <!-- Manageable -->
+    <div id="rptYellowSection"></div>
+
+    <!-- Clear -->
+    <div id="rptGreenSection"></div>
+
+    <!-- Disclaimer -->
+    <div class="report-disclaimer" id="rptDisclaimer">—</div>
+
+  </div>
+
+</div>
+
+<div class="footer">SZ Real Estate Group · DRE #02066500 · Samuel K. Zieour, Realtor · Co-Founder & Team Lead · DRE #01397303</div>
+
+<script>
+  // Set today's date
+  document.getElementById('auditDate').value = new Date().toLocaleDateString('en-US', {
+    month: '2-digit', day: '2-digit', year: 'numeric'
+  });
+
+  async function runAudit() {
+    const lastName = document.getElementById('lastNameSearch').value.trim();
+    if (!lastName) { alert('Please enter the client last name to locate the folder.'); return; }
+
+    const btn = document.getElementById('auditBtn');
+    const statusBar = document.getElementById('statusBar');
+    const statusText = document.getElementById('statusText');
+
+    btn.disabled = true;
+    document.getElementById('report-output').style.display = 'none';
+    statusBar.className = 'status-bar loading';
+    statusText.textContent = 'Locating transaction folder in Google Drive...';
+
+    const steps = [
+      'Locating transaction folder in Google Drive...',
+      'Inventorying E1 — Contracts & Addendums...',
+      'Inventorying E2 — Disclosures & Reports...',
+      'Inventorying E3 — Inspections & RFR...',
+      'Inventorying E4 — Title & Escrow...',
+      'Running AI compliance analysis...',
+      'Generating audit report...'
+    ];
+    let stepIdx = 0;
+    const stepTimer = setInterval(() => {
+      stepIdx = Math.min(stepIdx + 1, steps.length - 1);
+      statusText.textContent = steps[stepIdx];
+    }, 4000);
+
+    const payload = {
+      lastNameSearch: lastName,
+      transactionType: document.querySelector('input[name="txType"]:checked').value,
+      yearBuilt: document.getElementById('yearBuilt').value.trim(),
+      hoaPresent: document.querySelector('input[name="hoa"]:checked').value,
+      poolPresent: document.querySelector('input[name="pool"]:checked').value,
+      dualAgency: document.querySelector('input[name="dual"]:checked').value,
+      community55plus: document.querySelector('input[name="c55"]:checked').value,
+      submittedBy: document.getElementById('submittedBy').value
+    };
+
+    try {
+      const res = await fetch('/.netlify/functions/audit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      clearInterval(stepTimer);
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Audit function returned an error');
+      }
+
+      const data = await res.json();
+      statusBar.className = 'status-bar';
+      renderReport(data, payload);
+
+    } catch (err) {
+      clearInterval(stepTimer);
+      statusBar.className = 'status-bar error';
+      statusText.textContent = err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function renderReport(data, payload) {
+    const report = data.report;
+    const output = document.getElementById('report-output');
+
+    // Header
+    document.getElementById('rptFolder').textContent = data.folderName;
+    document.getElementById('rptBy').textContent = payload.submittedBy;
+    document.getElementById('rptDate').textContent = document.getElementById('auditDate').value;
+
+    // Risk banner
+    const riskBanner = document.getElementById('rptRiskBanner');
+    const riskLabels = { HIGH: '🔴 High Risk — Action Required Before COE', MEDIUM: '🟡 Medium Risk — Review Items Below', LOW: '✅ Low Risk — File Appears Complete' };
+    riskBanner.textContent = riskLabels[report.overallRisk] || report.overallRisk;
+    riskBanner.className = `risk-banner ${report.overallRisk}`;
+
+    // Summary
+    document.getElementById('rptSummary').textContent = report.summary;
+
+    // Score pills
+    document.getElementById('rptRedCount').textContent = (report.trueRisk || []).length;
+    document.getElementById('rptYellowCount').textContent = (report.manageable || []).length;
+    document.getElementById('rptGreenCount').textContent = (report.clear || []).length;
+
+    // Inventory grid
+    const inv = data.inventory || {};
+    const invEl = document.getElementById('rptInventory');
+    invEl.innerHTML = ['E1 - Contracts & Addendums', 'E2 - Disclosures & Reports', 'E3 - Inspections & RFR', 'E4 - Title & Escrow', 'E5 - HOA Docs']
+      .map(name => {
+        const key = Object.keys(inv).find(k => k.includes(name.split(' ')[0])) || '';
+        const files = inv[key] || [];
+        const label = name.split(' ')[0];
+        return `<div class="inv-cell">
+          <span class="inv-label">${label}</span>
+          <span class="inv-count">${files.length}</span>
+          <div class="inv-files">${files.length === 1 ? '1 file' : `${files.length} files`}</div>
+        </div>`;
+      }).join('');
+
+    // Sections
+    renderSection('rptRedSection', report.trueRisk || [], '🔴', 'TRUE RISK — Action Required Before COE', 'red');
+    renderSection('rptYellowSection', report.manageable || [], '🟡', 'MANAGEABLE — Verify Before COE', 'yellow');
+    renderSection('rptGreenSection', report.clear || [], '✅', 'CLEAR — Documents Confirmed Present', 'green');
+
+    // Disclaimer
+    document.getElementById('rptDisclaimer').textContent = report.disclaimer;
+
+    output.style.display = 'block';
+    output.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function renderSection(elId, items, icon, title, colorClass) {
+    const el = document.getElementById(elId);
+    if (!items || items.length === 0) { el.innerHTML = ''; return; }
+    el.innerHTML = `
+      <div class="report-section">
+        <div class="report-section-header ${colorClass}">${title} (${items.length})</div>
+        ${items.map(item => `
+          <div class="report-item">
+            <div class="report-item-icon">${icon}</div>
+            <div class="report-item-content">
+              <div class="report-item-name">${item.item}</div>
+              <div class="report-item-detail">${item.detail}</div>
+              ${item.folder ? `<div class="report-item-folder">${item.folder}</div>` : ''}
+            </div>
+          </div>
+        `).join('')}
+      </div>`;
+  }
+</script>
+</body>
+</html>
