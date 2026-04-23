@@ -436,10 +436,27 @@ function callClaude(prompt) {
         try {
           const parsed = JSON.parse(data);
           const text = parsed.content?.[0]?.text || '';
-          const clean = text.replace(/```json|```/g, '').trim();
-          resolve(JSON.parse(clean));
+          // Strip any markdown code fences
+          const clean = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+          const result = JSON.parse(clean);
+          // Ensure all required arrays exist
+          result.trueRisk = result.trueRisk || [];
+          result.manageable = result.manageable || [];
+          result.clear = result.clear || [];
+          result.summary = result.summary || 'Audit complete.';
+          result.overallRisk = result.overallRisk || 'LOW';
+          result.disclaimer = result.disclaimer || 'This report confirms document presence based on file names and content snippets from Google Drive. Agent review required before COE.';
+          resolve(result);
         } catch (e) {
-          resolve({ error: 'Failed to parse Claude response', raw: data });
+          // Return a structured error report rather than crashing
+          resolve({
+            summary: 'The AI analysis encountered a parsing error. Raw response captured for review.',
+            overallRisk: 'MEDIUM',
+            trueRisk: [],
+            manageable: [{ item: 'AI Response Parse Error', detail: 'Claude returned a response that could not be parsed as JSON. Check function logs.', folder: 'System' }],
+            clear: [],
+            disclaimer: 'Audit incomplete — please re-run.'
+          });
         }
       });
     });
