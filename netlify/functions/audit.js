@@ -125,12 +125,12 @@ async function readFileSnippet(fileId, mimeType, token) {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${token}`,
-          Range: 'bytes=0-8000' // first ~8KB only
+          Range: 'bytes=0-4000' // first ~4KB only
         }
       }, res => {
         let data = '';
-        res.on('data', c => { if (data.length < 6000) data += c; });
-        res.on('end', () => resolve(data.replace(/[^\x20-\x7E\n\r\t]/g, ' ').substring(0, 3000)));
+        res.on('data', c => { if (data.length < 3000) data += c; });
+        res.on('end', () => resolve(data.replace(/[^\x20-\x7E\n\r\t]/g, ' ').substring(0, 1500)));
       });
       req.on('error', () => resolve(''));
       req.end();
@@ -341,10 +341,10 @@ function buildClaudePrompt(folderName, conditions, inventory, checklistSnippet, 
     'Age Verification document — if 55+ community',
   ] : ['N/A — No HOA indicated for this property'];
 
-  // Format inventory for Claude
+  // Format inventory for Claude — keep snippets short to stay within token limits
   const inventoryText = Object.entries(inventory).map(([folder, files]) => {
     if (files.length === 0) return `${folder}: [EMPTY — no documents filed]`;
-    return `${folder}:\n${files.map(f => `  • ${f.name} (${Math.round(f.size/1024)}KB)\n    SNIPPET: ${f.snippet.substring(0, 500)}`).join('\n')}`;
+    return `${folder}:\n${files.map(f => `  • ${f.name} (${Math.round(f.size/1024)}KB)\n    SNIPPET: ${f.snippet.substring(0, 250)}`).join('\n')}`;
   }).join('\n\n');
 
   return `You are the SZREG AI Pre-Audit system. You are performing a transaction compliance audit for SZ Real Estate Group.
@@ -416,7 +416,7 @@ function callClaude(prompt) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 2000,
+      max_tokens: 4000,
       messages: [{ role: 'user', content: prompt }]
     });
 
@@ -436,6 +436,7 @@ function callClaude(prompt) {
         try {
           const parsed = JSON.parse(data);
           const text = parsed.content?.[0]?.text || '';
+          console.log('Claude raw response (first 500):', text.substring(0, 500));
           // Strip any markdown code fences
           const clean = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
           const result = JSON.parse(clean);
