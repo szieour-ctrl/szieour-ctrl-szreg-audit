@@ -107,34 +107,32 @@ async function getSnippet(fileId, token) {
   return result;
 }
 
-// Read first ~3000 chars of a PDF via export
+// Read first chunk of a file for snippet - safe for all file types
 async function readFileSnippet(fileId, mimeType, token) {
   try {
-    let path;
+    // For Google Docs - export as plain text (safe)
     if (mimeType === 'application/vnd.google-apps.document') {
-      path = `/drive/v3/files/${fileId}/export?mimeType=text%2Fplain`;
-    } else {
-      // For PDFs, use the files.get with alt=media — but limit via range header
-      path = `/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
+      return new Promise((resolve) => {
+        const req = https.request({
+          hostname: 'www.googleapis.com',
+          path: `/drive/v3/files/${fileId}/export?mimeType=text%2Fplain`,
+          method: 'GET',
+          headers: { Authorization: `Bearer ${token}` }
+        }, res => {
+          let data = '';
+          res.on('data', c => { if (data.length < 2000) data += c.toString('utf8'); });
+          res.on('end', () => resolve(data.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\xFF]/g, '').substring(0, 800)));
+        });
+        req.on('error', () => resolve(''));
+        req.end();
+      });
     }
 
-    return new Promise((resolve) => {
-      const req = https.request({
-        hostname: 'www.googleapis.com',
-        path,
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Range: 'bytes=0-4000' // first ~4KB only
-        }
-      }, res => {
-        let data = '';
-        res.on('data', c => { if (data.length < 3000) data += c; });
-        res.on('end', () => resolve(data.replace(/[^\x20-\x7E\n\r\t]/g, ' ').substring(0, 1500)));
-      });
-      req.on('error', () => resolve(''));
-      req.end();
-    });
+    // For PDFs - just use the Drive search snippet (already retrieved)
+    // Raw PDF bytes are binary and will corrupt the JSON payload
+    // Return empty string here; the filename + size is enough for audit purposes
+    return '';
+
   } catch (e) {
     return '';
   }
@@ -228,12 +226,18 @@ exports.handler = async (event) => {
       // For each file, grab a snippet
       const fileData = [];
       for (const file of files) {
-        const snippet = await readFileSnippet(file.id, file.mimeType, token);
+        const rawSnippet = await readFileSnippet(file.id, file.mimeType, token);
+        // Sanitize: remove any characters that would break JSON encoding
+        const snippet = rawSnippet
+          .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+          .replace(/\\/g, '\\\\')
+          .replace(/"/g, '\\"')
+          .substring(0, 500);
         fileData.push({
           name: file.name,
           id: file.id,
           size: file.size || 0,
-          snippet: snippet.substring(0, 1500)
+          snippet
         });
       }
       inventory[label] = fileData;
@@ -341,10 +345,17 @@ function buildClaudePrompt(folderName, conditions, inventory, checklistSnippet, 
     'Age Verification document — if 55+ community',
   ] : ['N/A — No HOA indicated for this property'];
 
-  // Format inventory for Claude — keep snippets short to stay within token limits
+  // Format inventory for Claude — filename is primary identifier, snippet is supplemental
   const inventoryText = Object.entries(inventory).map(([folder, files]) => {
     if (files.length === 0) return `${folder}: [EMPTY — no documents filed]`;
-    return `${folder}:\n${files.map(f => `  • ${f.name} (${Math.round(f.size/1024)}KB)\n    SNIPPET: ${f.snippet.substring(0, 250)}`).join('\n')}`;
+    return `${folder}:\n${files.map(f => {
+      const sizeKB = Math.round((parseInt(f.size) || 0) / 1024);
+      const snippetText = f.snippet && f.snippet.trim().length > 10
+        ? `\n    CONTENT: ${f.snippet.substring(0, 200)}`
+        : '';
+      const emptyFlag = sizeKB === 0 ? ' ⚠️ FILE IS EMPTY (0 bytes)' : '';
+      return `  • ${f.name} (${sizeKB}KB)${emptyFlag}${snippetText}`;
+    }).join('\n')}`;
   }).join('\n\n');
 
   return `You are the SZREG AI Pre-Audit system. You are performing a transaction compliance audit for SZ Real Estate Group.
