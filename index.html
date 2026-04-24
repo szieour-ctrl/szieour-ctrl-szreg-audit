@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SZREG AI Pre-Audit Tool</title>
+<title>SZREG AI Compliance Audit</title>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -57,7 +57,6 @@
   }
   .header-text { flex: 1; }
   .header-title {
-    font-family: 'DM Sans', sans-serif;
     font-size: 15px;
     font-weight: 600;
     color: var(--white);
@@ -82,14 +81,13 @@
     border-radius: 2px;
   }
 
-  /* ── Main layout ── */
+  /* ── Main ── */
   .main {
     max-width: 780px;
     margin: 0 auto;
     padding: 32px 20px 60px;
   }
 
-  /* ── Section title ── */
   .section-title {
     font-family: 'Playfair Display', serif;
     font-size: 22px;
@@ -103,6 +101,21 @@
     margin-bottom: 28px;
     letter-spacing: 0.2px;
   }
+
+  /* ── What's new banner ── */
+  .upgrade-banner {
+    background: rgba(201,168,76,0.08);
+    border: 1px solid rgba(201,168,76,0.2);
+    border-radius: 6px;
+    padding: 14px 20px;
+    margin-bottom: 24px;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .upgrade-banner-icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+  .upgrade-banner-text { font-size: 12px; color: rgba(255,255,255,0.6); line-height: 1.6; }
+  .upgrade-banner-text strong { color: var(--gold); }
 
   /* ── Card ── */
   .card {
@@ -131,16 +144,13 @@
     font-size: 13px;
   }
   .card-header-title {
-    font-family: 'DM Sans', sans-serif;
     font-size: 11px;
     font-weight: 600;
     color: var(--gold);
     letter-spacing: 3px;
     text-transform: uppercase;
   }
-  .card-body {
-    padding: 24px;
-  }
+  .card-body { padding: 24px; }
 
   /* ── Form fields ── */
   .field-row {
@@ -172,9 +182,7 @@
     outline: none;
     -webkit-appearance: none;
   }
-  .field input:focus, .field select:focus {
-    border-color: var(--gold);
-  }
+  .field input:focus, .field select:focus { border-color: var(--gold); }
   .field .hint {
     font-size: 11px;
     color: var(--gray-400);
@@ -202,20 +210,14 @@
     text-transform: none;
     border: none;
   }
-  .toggle-group label:not(:last-child) {
-    border-right: 1.5px solid var(--gray-200);
-  }
+  .toggle-group label:not(:last-child) { border-right: 1.5px solid var(--gray-200); }
   .toggle-group input[type="radio"]:checked + label {
     background: var(--navy);
-    color: var(--white);
+    color: var(--gold);
     font-weight: 600;
   }
-  .toggle-group.type input[type="radio"]:checked + label {
-    background: var(--navy);
-    color: var(--gold);
-  }
 
-  /* ── Conditionals grid ── */
+  /* ── Conditionals ── */
   .conditionals {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -230,11 +232,7 @@
     justify-content: space-between;
     gap: 12px;
   }
-  .conditional-label {
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--gray-800);
-  }
+  .conditional-label { font-size: 13px; font-weight: 500; color: var(--gray-800); }
   .conditional-label span {
     display: block;
     font-size: 11px;
@@ -266,7 +264,7 @@
     color: var(--white);
   }
 
-  /* ── Submit button ── */
+  /* ── Submit ── */
   .submit-btn {
     width: 100%;
     background: var(--gold);
@@ -290,7 +288,7 @@
     cursor: not-allowed;
   }
 
-  /* ── Status bar ── */
+  /* ── Status ── */
   .status-bar {
     border-radius: 4px;
     padding: 14px 20px;
@@ -305,7 +303,7 @@
     display: flex;
     background: rgba(201,168,76,0.1);
     border: 1px solid rgba(201,168,76,0.25);
-    color: var(--gold);
+    color: var(--gold-light);
   }
   .status-bar.error {
     display: flex;
@@ -324,175 +322,103 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* ── Report output ── */
-  #report-output { display: none; margin-top: 24px; }
-
-  .report-header {
-    background: var(--navy-mid);
-    border-radius: 6px 6px 0 0;
-    padding: 20px 28px;
-    border-bottom: 2px solid var(--gold);
+  /* ── Confirmation panel ── */
+  .confirmation-panel {
+    display: none;
+    margin-top: 24px;
+    background: var(--white);
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.25);
   }
-  .report-folder {
+  .confirmation-header {
+    background: var(--green);
+    padding: 20px 28px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .confirmation-icon {
+    width: 40px;
+    height: 40px;
+    background: rgba(255,255,255,0.15);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    flex-shrink: 0;
+  }
+  .confirmation-header-text {}
+  .confirmation-title {
     font-family: 'Playfair Display', serif;
     font-size: 18px;
     font-weight: 600;
     color: var(--white);
-    margin-bottom: 4px;
+    margin-bottom: 3px;
   }
-  .report-meta {
+  .confirmation-sub {
     font-size: 12px;
-    color: rgba(255,255,255,0.5);
-    letter-spacing: 0.5px;
+    color: rgba(255,255,255,0.7);
   }
-  .report-meta strong { color: var(--gold); }
-
-  .risk-banner {
-    padding: 14px 28px;
-    font-size: 12px;
+  .confirmation-body {
+    padding: 24px 28px;
+  }
+  .confirmation-detail {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .conf-item {}
+  .conf-item-label {
+    font-size: 10px;
     font-weight: 700;
     letter-spacing: 2px;
     text-transform: uppercase;
-  }
-  .risk-banner.HIGH { background: #fdf0ef; color: var(--red); border-bottom: 1px solid #f0c0bc; }
-  .risk-banner.MEDIUM { background: var(--yellow-light); color: var(--yellow); border-bottom: 1px solid #f0d090; }
-  .risk-banner.LOW { background: var(--green-light); color: var(--green); border-bottom: 1px solid #b0dfc4; }
-
-  .report-summary {
-    background: var(--white);
-    padding: 20px 28px;
-    font-size: 14px;
-    color: var(--gray-600);
-    line-height: 1.7;
-    border-bottom: 1px solid var(--gray-200);
-  }
-
-  .report-section {
-    background: var(--white);
-  }
-  .report-section-header {
-    padding: 14px 28px 10px;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 3px;
-    text-transform: uppercase;
-    border-bottom: 1px solid var(--gray-200);
-  }
-  .report-section-header.red { color: var(--red); background: var(--red-light); }
-  .report-section-header.yellow { color: var(--yellow); background: var(--yellow-light); }
-  .report-section-header.green { color: var(--green); background: var(--green-light); }
-
-  .report-item {
-    padding: 14px 28px;
-    border-bottom: 1px solid var(--gray-200);
-    display: flex;
-    gap: 14px;
-    align-items: flex-start;
-  }
-  .report-item:last-child { border-bottom: none; }
-  .report-item-icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
-  .report-item-content { flex: 1; }
-  .report-item-name {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--gray-800);
-    margin-bottom: 3px;
-  }
-  .report-item-detail {
-    font-size: 12px;
-    color: var(--gray-600);
-    line-height: 1.5;
-  }
-  .report-item-folder {
-    font-size: 10px;
-    font-weight: 700;
     color: var(--gray-400);
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    margin-top: 4px;
-  }
-
-  .report-disclaimer {
-    background: var(--gray-100);
-    padding: 16px 28px;
-    font-size: 11px;
-    color: var(--gray-400);
-    line-height: 1.6;
-    border-radius: 0 0 6px 6px;
-    border-top: 1px solid var(--gray-200);
-  }
-
-  .score-row {
-    display: flex;
-    gap: 12px;
-    padding: 16px 28px;
-    background: var(--white);
-    border-bottom: 1px solid var(--gray-200);
-  }
-  .score-pill {
-    flex: 1;
-    border-radius: 4px;
-    padding: 10px 12px;
-    text-align: center;
-  }
-  .score-pill.red { background: var(--red-light); border: 1px solid #f0c0bc; }
-  .score-pill.yellow { background: var(--yellow-light); border: 1px solid #f0d090; }
-  .score-pill.green { background: var(--green-light); border: 1px solid #b0dfc4; }
-  .score-pill .num {
-    font-family: 'Playfair Display', serif;
-    font-size: 22px;
-    font-weight: 700;
-    display: block;
-  }
-  .score-pill.red .num { color: var(--red); }
-  .score-pill.yellow .num { color: var(--yellow); }
-  .score-pill.green .num { color: var(--green); }
-  .score-pill .lbl {
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    color: var(--gray-400);
-    margin-top: 2px;
-    display: block;
-  }
-
-  /* ── Folder inventory ── */
-  .inventory-grid {
-    display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    gap: 8px;
-    padding: 16px 28px;
-    background: var(--white);
-    border-bottom: 1px solid var(--gray-200);
-  }
-  .inv-cell {
-    background: var(--gray-100);
-    border-radius: 4px;
-    padding: 10px 8px;
-    text-align: center;
-  }
-  .inv-cell .inv-label {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 1px;
-    color: var(--gray-400);
-    text-transform: uppercase;
-    display: block;
     margin-bottom: 4px;
   }
-  .inv-cell .inv-count {
-    font-family: 'Playfair Display', serif;
-    font-size: 20px;
-    font-weight: 700;
-    color: var(--navy);
-    display: block;
+  .conf-item-value {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--gray-800);
   }
-  .inv-cell .inv-files {
-    font-size: 10px;
+  .confirmation-note {
+    background: var(--gold-pale);
+    border: 1px solid rgba(201,168,76,0.25);
+    border-radius: 4px;
+    padding: 14px 16px;
+    font-size: 13px;
+    color: var(--gray-600);
+    line-height: 1.6;
+    margin-bottom: 16px;
+  }
+  .confirmation-note strong { color: var(--gray-800); }
+  .confirmation-what {
+    font-size: 12px;
     color: var(--gray-400);
-    margin-top: 2px;
+    line-height: 1.7;
   }
+  .confirmation-what li { margin-left: 16px; margin-bottom: 4px; }
+
+  .run-another-btn {
+    width: 100%;
+    background: var(--navy);
+    color: var(--gold);
+    border: none;
+    padding: 13px 32px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-top: 20px;
+  }
+  .run-another-btn:hover { background: var(--navy-light); }
 
   /* ── Footer ── */
   .footer {
@@ -507,8 +433,7 @@
     .field-row { grid-template-columns: 1fr; }
     .field-row.three { grid-template-columns: 1fr 1fr; }
     .conditionals { grid-template-columns: 1fr; }
-    .inventory-grid { grid-template-columns: repeat(3, 1fr); }
-    .score-row { flex-wrap: wrap; }
+    .confirmation-detail { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -518,14 +443,22 @@
   <div class="logo-box">SZ</div>
   <div class="header-text">
     <div class="header-title">SZ Real Estate Group</div>
-    <div class="header-sub">AI Pre-Audit Tool</div>
+    <div class="header-sub">AI Compliance Audit</div>
   </div>
-  <div class="header-badge">Phase 5</div>
+  <div class="header-badge">Phase 5B</div>
 </div>
 
 <div class="main">
-  <div class="section-title">Transaction Pre-Audit</div>
-  <div class="section-sub">Enter transaction details to run an AI compliance review of your E1–E5 executed documents.</div>
+  <div class="section-title">Transaction Compliance Audit</div>
+  <div class="section-sub">Submit a transaction for full AI compliance review. Claude reads every document in E1–E5 and delivers a detailed report to your email in 3–5 minutes.</div>
+
+  <div class="upgrade-banner">
+    <div class="upgrade-banner-icon">📄</div>
+    <div class="upgrade-banner-text">
+      <strong>Full Document Review — Phase 5B</strong><br>
+      Claude now reads the actual content of every PDF in your transaction folder — not just filenames. Commission demand amounts are verified against the RPA. Pest Section 1 findings determine whether clearance is required. Party names are cross-referenced across documents. Combined disclosure packages are read and each form confirmed individually.
+    </div>
+  </div>
 
   <!-- Card 1: Transaction Identity -->
   <div class="card">
@@ -542,7 +475,7 @@
         </div>
         <div class="field">
           <label>Transaction Type</label>
-          <div class="toggle-group type">
+          <div class="toggle-group">
             <input type="radio" name="txType" id="typeBuyer" value="BUYER" checked>
             <label for="typeBuyer">Buyer File</label>
             <input type="radio" name="txType" id="typeSeller" value="SELLER">
@@ -569,6 +502,13 @@
           <input type="text" id="auditDate" readonly>
         </div>
       </div>
+      <div class="field-row full">
+        <div class="field">
+          <label>Report Email</label>
+          <input type="email" id="agentEmail" placeholder="sam@szrealestategroup.com">
+          <div class="hint">Compliance report will be sent here when complete</div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -584,7 +524,7 @@
         <div class="conditional-item">
           <div class="conditional-label">
             HOA Present
-            <span>Triggers E5 document requirements</span>
+            <span>Triggers E5 document review</span>
           </div>
           <div class="mini-toggle">
             <input type="radio" name="hoa" id="hoaNo" value="no" checked>
@@ -597,7 +537,7 @@
         <div class="conditional-item">
           <div class="conditional-label">
             Pool or Spa
-            <span>Triggers pool inspection requirement</span>
+            <span>Triggers pool inspection review</span>
           </div>
           <div class="mini-toggle">
             <input type="radio" name="pool" id="poolNo" value="no" checked>
@@ -610,7 +550,7 @@
         <div class="conditional-item">
           <div class="conditional-label">
             Dual Agency
-            <span>Triggers PRBS requirement</span>
+            <span>Triggers PRBS review</span>
           </div>
           <div class="mini-toggle">
             <input type="radio" name="dual" id="dualNo" value="no" checked>
@@ -623,7 +563,7 @@
         <div class="conditional-item">
           <div class="conditional-label">
             55+ Community
-            <span>Triggers age verification requirement</span>
+            <span>Triggers age verification review</span>
           </div>
           <div class="mini-toggle">
             <input type="radio" name="c55" id="c55No" value="no" checked>
@@ -638,62 +578,64 @@
   </div>
 
   <!-- Submit -->
-  <button class="submit-btn" id="auditBtn" onclick="runAudit()">
-    Run AI Pre-Audit →
+  <button class="submit-btn" id="auditBtn" onclick="submitAudit()">
+    Submit for Compliance Audit →
   </button>
 
-  <!-- Status bar -->
+  <!-- Status (brief — just while submitting) -->
   <div class="status-bar" id="statusBar">
     <div class="spinner"></div>
-    <span id="statusText">Connecting to Google Drive...</span>
+    <span id="statusText">Submitting audit request...</span>
   </div>
 
-  <!-- Report Output -->
-  <div id="report-output">
-
-    <div class="report-header">
-      <div class="report-folder" id="rptFolder">—</div>
-      <div class="report-meta">
-        Audited by <strong id="rptBy">—</strong> &nbsp;·&nbsp;
-        <strong id="rptDate">—</strong> &nbsp;·&nbsp;
-        SZREG AI Pre-Audit System
+  <!-- Confirmation Panel -->
+  <div class="confirmation-panel" id="confirmationPanel">
+    <div class="confirmation-header">
+      <div class="confirmation-icon">✓</div>
+      <div class="confirmation-header-text">
+        <div class="confirmation-title">Audit Submitted</div>
+        <div class="confirmation-sub">Claude is reading your transaction documents now</div>
       </div>
     </div>
+    <div class="confirmation-body">
+      <div class="confirmation-detail">
+        <div class="conf-item">
+          <div class="conf-item-label">Transaction</div>
+          <div class="conf-item-value" id="confFolder">—</div>
+        </div>
+        <div class="conf-item">
+          <div class="conf-item-label">Submitted By</div>
+          <div class="conf-item-value" id="confBy">—</div>
+        </div>
+        <div class="conf-item">
+          <div class="conf-item-label">Report Delivery</div>
+          <div class="conf-item-value" id="confEmail">—</div>
+        </div>
+        <div class="conf-item">
+          <div class="conf-item-label">Est. Completion</div>
+          <div class="conf-item-value">3–5 minutes</div>
+        </div>
+      </div>
 
-    <div class="risk-banner" id="rptRiskBanner">—</div>
-    <div class="report-summary" id="rptSummary">—</div>
+      <div class="confirmation-note">
+        <strong>Your compliance report is being generated.</strong> Claude is downloading and reading every PDF in E1–E5 — not just checking filenames. You'll receive the full report by email when the analysis is complete.
+      </div>
 
-    <!-- Score pills -->
-    <div class="score-row">
-      <div class="score-pill red">
-        <span class="num" id="rptRedCount">0</span>
-        <span class="lbl">True Risk</span>
+      <div class="confirmation-what">
+        <strong style="font-size:11px;letter-spacing:1px;text-transform:uppercase;color:#999;">What Claude is reviewing right now:</strong>
+        <ul style="margin-top:8px;">
+          <li>RPA — purchase price, party names, contingency dates, commission %</li>
+          <li>Commission Demand — percentage vs RPA, broker execution, Authentisign ID</li>
+          <li>TDS / SPQ / AVID — seller names, completed sections, signatures</li>
+          <li>NHD / SBSA / BIA — confirmed present in any combined disclosure package</li>
+          <li>Pest report — Section 1 findings, clearance cert required or N/A</li>
+          <li>All RFR/RRRR documents — repair items, dollar amounts, execution</li>
+          <li>Cross-reference: commission %, party name consistency, property address</li>
+        </ul>
       </div>
-      <div class="score-pill yellow">
-        <span class="num" id="rptYellowCount">0</span>
-        <span class="lbl">Manageable</span>
-      </div>
-      <div class="score-pill green">
-        <span class="num" id="rptGreenCount">0</span>
-        <span class="lbl">Clear</span>
-      </div>
+
+      <button class="run-another-btn" onclick="resetForm()">Run Another Audit →</button>
     </div>
-
-    <!-- Inventory grid -->
-    <div class="inventory-grid" id="rptInventory"></div>
-
-    <!-- True Risk -->
-    <div id="rptRedSection"></div>
-
-    <!-- Manageable -->
-    <div id="rptYellowSection"></div>
-
-    <!-- Clear -->
-    <div id="rptGreenSection"></div>
-
-    <!-- Disclaimer -->
-    <div class="report-disclaimer" id="rptDisclaimer">—</div>
-
   </div>
 
 </div>
@@ -701,38 +643,47 @@
 <div class="footer">SZ Real Estate Group · DRE #02066500 · Samuel K. Zieour, Realtor · Co-Founder & Team Lead · DRE #01397303</div>
 
 <script>
-  // Set today's date
   document.getElementById('auditDate').value = new Date().toLocaleDateString('en-US', {
     month: '2-digit', day: '2-digit', year: 'numeric'
   });
 
-  async function runAudit() {
+  // Pre-fill agent email based on submittedBy selection
+  const emailMap = {
+    'Sam Zieour': 'sam@szrealestategroup.com',
+    'John Klein': 'info@szrealestategroup.com',
+    'TC / Admin': 'sam@szrealestategroup.com'
+  };
+  document.getElementById('submittedBy').addEventListener('change', function() {
+    const emailField = document.getElementById('agentEmail');
+    if (!emailField.dataset.userEdited) {
+      emailField.value = emailMap[this.value] || '';
+    }
+  });
+  document.getElementById('agentEmail').addEventListener('input', function() {
+    this.dataset.userEdited = 'true';
+  });
+  // Set default email on load
+  document.getElementById('agentEmail').value = 'sam@szrealestategroup.com';
+
+  async function submitAudit() {
     const lastName = document.getElementById('lastNameSearch').value.trim();
-    if (!lastName) { alert('Please enter the client last name to locate the folder.'); return; }
+    if (!lastName) {
+      alert('Please enter the client last name to locate the folder.');
+      return;
+    }
+    const agentEmail = document.getElementById('agentEmail').value.trim();
+    if (!agentEmail) {
+      alert('Please enter the report delivery email address.');
+      return;
+    }
 
     const btn = document.getElementById('auditBtn');
     const statusBar = document.getElementById('statusBar');
     const statusText = document.getElementById('statusText');
 
     btn.disabled = true;
-    document.getElementById('report-output').style.display = 'none';
     statusBar.className = 'status-bar loading';
-    statusText.textContent = 'Locating transaction folder in Google Drive...';
-
-    const steps = [
-      'Locating transaction folder in Google Drive...',
-      'Inventorying E1 — Contracts & Addendums...',
-      'Inventorying E2 — Disclosures & Reports...',
-      'Inventorying E3 — Inspections & RFR...',
-      'Inventorying E4 — Title & Escrow...',
-      'Running AI compliance analysis...',
-      'Generating audit report...'
-    ];
-    let stepIdx = 0;
-    const stepTimer = setInterval(() => {
-      stepIdx = Math.min(stepIdx + 1, steps.length - 1);
-      statusText.textContent = steps[stepIdx];
-    }, 4000);
+    statusText.textContent = 'Submitting audit request...';
 
     const payload = {
       lastNameSearch: lastName,
@@ -742,109 +693,51 @@
       poolPresent: document.querySelector('input[name="pool"]:checked').value,
       dualAgency: document.querySelector('input[name="dual"]:checked').value,
       community55plus: document.querySelector('input[name="c55"]:checked').value,
-      submittedBy: document.getElementById('submittedBy').value
+      submittedBy: document.getElementById('submittedBy').value,
+      agentEmail: agentEmail,
+      auditDate: document.getElementById('auditDate').value
     };
 
     try {
-      const res = await fetch('/.netlify/functions/audit', {
+      // Background functions return 202 immediately — fire and confirm
+      const res = await fetch('/.netlify/functions/audit-background', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
 
-      clearInterval(stepTimer);
+      statusBar.className = 'status-bar';
 
-      if (!res.ok) {
-        const err = await res.json();
+      if (res.status === 202 || res.ok) {
+        // Show confirmation panel
+        document.getElementById('confFolder').textContent = lastName + ' — ' + payload.transactionType;
+        document.getElementById('confBy').textContent = payload.submittedBy;
+        document.getElementById('confEmail').textContent = agentEmail;
+        document.getElementById('confirmationPanel').style.display = 'block';
+        document.getElementById('confirmationPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } else {
+        const err = await res.json().catch(() => ({ error: `Server error ${res.status}` }));
         throw new Error(err.error || `Server error ${res.status}`);
       }
 
-      const data = await res.json();
-      statusBar.className = 'status-bar';
-      renderReport(data, payload);
-
     } catch (err) {
-      clearInterval(stepTimer);
       statusBar.className = 'status-bar error';
       statusText.textContent = err.message;
-    } finally {
       btn.disabled = false;
     }
   }
 
-  function renderReport(data, payload) {
-    const report = data.report;
-    const output = document.getElementById('report-output');
-
-    // Header
-    document.getElementById('rptFolder').textContent = data.folderName;
-    document.getElementById('rptBy').textContent = payload.submittedBy;
-    document.getElementById('rptDate').textContent = document.getElementById('auditDate').value;
-
-    // Risk banner
-    const riskBanner = document.getElementById('rptRiskBanner');
-    const riskLabels = { HIGH: '🔴 High Risk — Action Required Before COE', MEDIUM: '🟡 Medium Risk — Review Items Below', LOW: '✅ Low Risk — File Appears Complete' };
-    riskBanner.textContent = riskLabels[report.overallRisk] || report.overallRisk;
-    riskBanner.className = `risk-banner ${report.overallRisk}`;
-
-    // Summary
-    document.getElementById('rptSummary').textContent = report.summary;
-
-    // Score pills
-    document.getElementById('rptRedCount').textContent = (report.trueRisk || []).length;
-    document.getElementById('rptYellowCount').textContent = (report.manageable || []).length;
-    document.getElementById('rptGreenCount').textContent = (report.clear || []).length;
-
-    // Inventory grid
-    const inv = data.inventory || {};
-    const invEl = document.getElementById('rptInventory');
-    const eFolders = [
-      { key: 'E1', label: 'E1', desc: 'Contracts' },
-      { key: 'E2', label: 'E2', desc: 'Disclosures' },
-      { key: 'E3', label: 'E3', desc: 'Inspections' },
-      { key: 'E4', label: 'E4', desc: 'Title' },
-      { key: 'E5', label: 'E5', desc: 'HOA' }
-    ];
-    invEl.innerHTML = eFolders.map(ef => {
-      // Match folder by name starting with the E key
-      const matchKey = Object.keys(inv).find(k => k.startsWith(ef.key)) || '';
-      const files = inv[matchKey] || [];
-      return `<div class="inv-cell">
-        <span class="inv-label">${ef.label}</span>
-        <span class="inv-count">${files.length}</span>
-        <div class="inv-files">${ef.desc}</div>
-      </div>`;
-    }).join('');
-
-    // Sections
-    renderSection('rptRedSection', report.trueRisk || [], '🔴', 'TRUE RISK — Action Required Before COE', 'red');
-    renderSection('rptYellowSection', report.manageable || [], '🟡', 'MANAGEABLE — Verify Before COE', 'yellow');
-    renderSection('rptGreenSection', report.clear || [], '✅', 'CLEAR — Documents Confirmed Present', 'green');
-
-    // Disclaimer
-    document.getElementById('rptDisclaimer').textContent = report.disclaimer;
-
-    output.style.display = 'block';
-    output.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }
-
-  function renderSection(elId, items, icon, title, colorClass) {
-    const el = document.getElementById(elId);
-    if (!items || items.length === 0) { el.innerHTML = ''; return; }
-    el.innerHTML = `
-      <div class="report-section">
-        <div class="report-section-header ${colorClass}">${title} (${items.length})</div>
-        ${items.map(item => `
-          <div class="report-item">
-            <div class="report-item-icon">${icon}</div>
-            <div class="report-item-content">
-              <div class="report-item-name">${item.item}</div>
-              <div class="report-item-detail">${item.detail}</div>
-              ${item.folder ? `<div class="report-item-folder">${item.folder}</div>` : ''}
-            </div>
-          </div>
-        `).join('')}
-      </div>`;
+  function resetForm() {
+    document.getElementById('lastNameSearch').value = '';
+    document.getElementById('yearBuilt').value = '';
+    document.getElementById('confirmationPanel').style.display = 'none';
+    document.getElementById('auditBtn').disabled = false;
+    document.querySelector('input[name="txType"][value="BUYER"]').checked = true;
+    document.querySelector('input[name="hoa"][value="no"]').checked = true;
+    document.querySelector('input[name="pool"][value="no"]').checked = true;
+    document.querySelector('input[name="dual"][value="no"]').checked = true;
+    document.querySelector('input[name="c55"][value="no"]').checked = true;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 </script>
 </body>
