@@ -1,8 +1,13 @@
 [build]
   functions = "netlify/functions"
 
-[functions]
-  node_bundler = "esbuild"
+# Background function — runs up to 15 minutes, returns 202 immediately
+# No timeout setting needed — background functions have their own execution model
+[functions."audit-background"]
+  # Background functions are identified by the -background suffix in the filename
+  # File must be: netlify/functions/audit-background.js
+  # They automatically return 202 Accepted and continue processing
 
+# Keep the old audit function available during transition (can remove after confirming 5B works)
 [functions."audit"]
   timeout = 30
