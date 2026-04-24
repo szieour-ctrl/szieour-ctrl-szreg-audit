@@ -87,55 +87,26 @@ function driveRequest(path, token) {
   });
 }
 
-async function listFolder(folderId, token) {
+async function listFolderWithSnippets(folderId, token) {
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-  const fields = encodeURIComponent('files(id,name,mimeType,size,createdTime,modifiedTime)');
+  // Request snippet in same call — no per-file reads needed
+  const fields = encodeURIComponent('files(id,name,mimeType,size,snippets)');
   const result = await driveRequest(
-    `/drive/v3/files?q=${q}&fields=${fields}&pageSize=50`,
+    `/drive/v3/files?q=${q}&fields=${fields}&pageSize=50&includeItemsFromAllDrives=false`,
     token
   );
   return result.files || [];
 }
 
-async function getSnippet(fileId, token) {
-  const fields = encodeURIComponent('id,name,description');
-  // Use export for Google Docs, otherwise get metadata with snippet
+// Simple folder listing without snippets — for navigation only
+async function listFolder(folderId, token) {
+  const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
+  const fields = encodeURIComponent('files(id,name,mimeType,size)');
   const result = await driveRequest(
-    `/drive/v3/files/${fileId}?fields=id,name,mimeType&supportsAllDrives=true`,
+    `/drive/v3/files?q=${q}&fields=${fields}&pageSize=50`,
     token
   );
-  return result;
-}
-
-// Read first chunk of a file for snippet - safe for all file types
-async function readFileSnippet(fileId, mimeType, token) {
-  try {
-    // For Google Docs - export as plain text (safe)
-    if (mimeType === 'application/vnd.google-apps.document') {
-      return new Promise((resolve) => {
-        const req = https.request({
-          hostname: 'www.googleapis.com',
-          path: `/drive/v3/files/${fileId}/export?mimeType=text%2Fplain`,
-          method: 'GET',
-          headers: { Authorization: `Bearer ${token}` }
-        }, res => {
-          let data = '';
-          res.on('data', c => { if (data.length < 2000) data += c.toString('utf8'); });
-          res.on('end', () => resolve(data.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\xFF]/g, '').substring(0, 800)));
-        });
-        req.on('error', () => resolve(''));
-        req.end();
-      });
-    }
-
-    // For PDFs - just use the Drive search snippet (already retrieved)
-    // Raw PDF bytes are binary and will corrupt the JSON payload
-    // Return empty string here; the filename + size is enough for audit purposes
-    return '';
-
-  } catch (e) {
-    return '';
-  }
+  return result.files || [];
 }
 
 // ─── RE Transactions 2026 folder ID ─────────────────────────────────────────
@@ -214,43 +185,33 @@ exports.handler = async (event) => {
       };
     }
 
-    // ── 5. Inventory E1–E5 ──────────────────────────────────────────────────
+    // ── 5. Inventory E1–E5 — one API call per subfolder, no per-file reads ───
     const eSubfolders = await listFolder(executedDocsId, token);
     const inventory = {};
 
     for (const subfolder of eSubfolders) {
       if (subfolder.mimeType !== 'application/vnd.google-apps.folder') continue;
-      const label = subfolder.name; // E1, E2, etc.
-      const files = await listFolder(subfolder.id, token);
+      const label = subfolder.name;
+      const files = await listFolderWithSnippets(subfolder.id, token);
 
-      // For each file, grab a snippet
-      const fileData = [];
-      for (const file of files) {
-        const rawSnippet = await readFileSnippet(file.id, file.mimeType, token);
-        // Sanitize: remove any characters that would break JSON encoding
-        const snippet = rawSnippet
-          .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
-          .replace(/\\/g, '\\\\')
-          .replace(/"/g, '\\"')
-          .substring(0, 500);
-        fileData.push({
-          name: file.name,
-          id: file.id,
-          size: file.size || 0,
-          snippet
-        });
-      }
-      inventory[label] = fileData;
+      inventory[label] = files
+        .filter(f => f.mimeType !== 'application/vnd.google-apps.folder')
+        .map(f => ({
+          name: f.name || 'Unknown',
+          size: parseInt(f.size) || 0,
+          // Drive API returns snippets as array — safely extract first one
+          snippet: Array.isArray(f.snippets) && f.snippets[0]
+            ? f.snippets[0].snippet.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '').substring(0, 300)
+            : ''
+        }));
     }
 
-    // ── 6. Also check parent folder for Pre-Audit Checklist ────────────────
-    const checklistFile = parentContents.find(f =>
-      f.name.includes('Pre-Audit') && f.mimeType === 'application/vnd.google-apps.document'
-    );
+    // ── 6. Check parent folder for Pre-Audit Checklist (name only) ──────────
     let checklistSnippet = '';
-    if (checklistFile) {
-      checklistSnippet = await readFileSnippet(checklistFile.id, checklistFile.mimeType, token);
-    }
+    const checklistFile = parentContents.find(f =>
+      f.name && f.name.includes('Pre-Audit')
+    );
+    // Skip reading checklist content — filename confirms presence
 
     // ── 7. Build dynamic required document list ─────────────────────────────
     const isPreX1978 = yearBuilt && parseInt(yearBuilt) < 1978;
