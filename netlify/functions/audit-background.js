@@ -18,7 +18,7 @@ const https = require('https');
 
 // ─── Pabbly webhook URL ───────────────────────────────────────────────────────
 // Replace with your actual Pabbly webhook URL for the compliance report workflow
-const PABBLY_WEBHOOK_URL = 'https://connect.pabbly.com/workflow/sendwebhookdata/https://connect.pabbly.com/workflow/sendwebhookdata/IjU3NjcwNTZlMDYzNDA0MzU1MjY4NTUzNTUxMzQi_pc';
+const PABBLY_WEBHOOK_URL = 'https://connect.pabbly.com/workflow/sendwebhookdata/IjU3NjcwNTZlMDYzNDA0MzU1MjY4NTUzNTUxMzQi_pc';
 
 // ─── Google Drive folder ID ───────────────────────────────────────────────────
 const RE_TRANSACTIONS_FOLDER = '1iuTI1fKo4IZps9hzXLPFoI3TUT3NaCKI';
