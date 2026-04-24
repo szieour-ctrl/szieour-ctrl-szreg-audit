@@ -87,19 +87,8 @@ function driveRequest(path, token) {
   });
 }
 
-async function listFolderWithSnippets(folderId, token) {
-  const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-  // Request snippet in same call — no per-file reads needed
-  const fields = encodeURIComponent('files(id,name,mimeType,size,snippets)');
-  const result = await driveRequest(
-    `/drive/v3/files?q=${q}&fields=${fields}&pageSize=50&includeItemsFromAllDrives=false`,
-    token
-  );
-  return result.files || [];
-}
-
-// Simple folder listing without snippets — for navigation only
-async function listFolder(folderId, token) {
+// List folder contents — filename and size only, no per-file reads
+async function listFolderContents(folderId, token) {
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
   const fields = encodeURIComponent('files(id,name,mimeType,size)');
   const result = await driveRequest(
@@ -161,7 +150,7 @@ exports.handler = async (event) => {
     const txFolder = folders.find(f => f.name.includes(typeKeyword)) || folders[0];
 
     // ── 3. Find 3. Active Transaction inside the parent folder ──────────────
-    const parentContents = await listFolder(txFolder.id, token);
+    const parentContents = await listFolderContents(txFolder.id, token);
     const activeTransaction = parentContents.find(f =>
       f.name.includes('Active Transaction') && f.mimeType === 'application/vnd.google-apps.folder'
     );
@@ -169,7 +158,7 @@ exports.handler = async (event) => {
     // ── 4. Find 4. Executed Docs ────────────────────────────────────────────
     let executedDocsId = null;
     if (activeTransaction) {
-      const atContents = await listFolder(activeTransaction.id, token);
+      const atContents = await listFolderContents(activeTransaction.id, token);
       const execDocs = atContents.find(f =>
         f.name.includes('Executed Docs') && f.mimeType === 'application/vnd.google-apps.folder'
       );
@@ -185,33 +174,27 @@ exports.handler = async (event) => {
       };
     }
 
-    // ── 5. Inventory E1–E5 — one API call per subfolder, no per-file reads ───
-    const eSubfolders = await listFolder(executedDocsId, token);
+    // ── 5. Inventory E1–E5 — filename + size only, no per-file reads ─────────
+    const eSubfolders = await listFolderContents(executedDocsId, token);
     const inventory = {};
 
     for (const subfolder of eSubfolders) {
       if (subfolder.mimeType !== 'application/vnd.google-apps.folder') continue;
       const label = subfolder.name;
-      const files = await listFolderWithSnippets(subfolder.id, token);
-
+      const files = await listFolderContents(subfolder.id, token);
       inventory[label] = files
         .filter(f => f.mimeType !== 'application/vnd.google-apps.folder')
         .map(f => ({
           name: f.name || 'Unknown',
-          size: parseInt(f.size) || 0,
-          // Drive API returns snippets as array — safely extract first one
-          snippet: Array.isArray(f.snippets) && f.snippets[0]
-            ? f.snippets[0].snippet.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '').substring(0, 300)
-            : ''
+          size: parseInt(f.size) || 0
         }));
     }
 
-    // ── 6. Check parent folder for Pre-Audit Checklist (name only) ──────────
+    // ── 6. Check parent folder for Pre-Audit Checklist ──────────────────────
     let checklistSnippet = '';
     const checklistFile = parentContents.find(f =>
       f.name && f.name.includes('Pre-Audit')
     );
-    // Skip reading checklist content — filename confirms presence
 
     // ── 7. Build dynamic required document list ─────────────────────────────
     const isPreX1978 = yearBuilt && parseInt(yearBuilt) < 1978;
@@ -306,16 +289,13 @@ function buildClaudePrompt(folderName, conditions, inventory, checklistSnippet, 
     'Age Verification document — if 55+ community',
   ] : ['N/A — No HOA indicated for this property'];
 
-  // Format inventory for Claude — filename is primary identifier, snippet is supplemental
+  // Format inventory for Claude — filename is the primary identifier
   const inventoryText = Object.entries(inventory).map(([folder, files]) => {
-    if (files.length === 0) return `${folder}: [EMPTY — no documents filed]`;
+    if (!files || files.length === 0) return `${folder}: [EMPTY — no documents filed]`;
     return `${folder}:\n${files.map(f => {
-      const sizeKB = Math.round((parseInt(f.size) || 0) / 1024);
-      const snippetText = f.snippet && f.snippet.trim().length > 10
-        ? `\n    CONTENT: ${f.snippet.substring(0, 200)}`
-        : '';
-      const emptyFlag = sizeKB === 0 ? ' ⚠️ FILE IS EMPTY (0 bytes)' : '';
-      return `  • ${f.name} (${sizeKB}KB)${emptyFlag}${snippetText}`;
+      const sizeKB = Math.round(f.size / 1024);
+      const emptyFlag = f.size === 0 ? ' *** FILE IS EMPTY — 0 bytes ***' : '';
+      return `  • ${f.name} (${sizeKB}KB)${emptyFlag}`;
     }).join('\n')}`;
   }).join('\n\n');
 
