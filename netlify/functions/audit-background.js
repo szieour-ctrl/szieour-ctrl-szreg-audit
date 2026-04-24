@@ -18,7 +18,7 @@ const https = require('https');
 
 // ─── Pabbly webhook URL ───────────────────────────────────────────────────────
 // Replace with your actual Pabbly webhook URL for the compliance report workflow
-const PABBLY_WEBHOOK_URL = 'https://connect.pabbly.com/workflow/sendwebhookdata/IjU3NjcwNTZlMDYzNDA0MzU1MjY4NTUzNTUxMzQi_pc';
+const PABBLY_WEBHOOK_URL = 'https://connect.pabbly.com/workflow/sendwebhookdata/https://connect.pabbly.com/workflow/sendwebhookdata/IjU3NjcwNTZlMDYzNDA0MzU1MjY4NTUzNTUxMzQi_pc';
 
 // ─── Google Drive folder ID ───────────────────────────────────────────────────
 const RE_TRANSACTIONS_FOLDER = '1iuTI1fKo4IZps9hzXLPFoI3TUT3NaCKI';
@@ -439,46 +439,87 @@ async function callClaudeWithDocuments(folderName, conditions, documents, submit
         'Content-Type': 'application/json',
         'x-api-key': process.env.ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'pdfs-2024-09-25'  // Required for PDF document support
+        'anthropic-beta': 'pdfs-2024-09-25,files-api-2025-04-14'
       }
     }, res => {
-      let data = '';
-      res.on('data', c => data += c);
+      const chunks = [];
+      res.on('data', c => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
       res.on('end', () => {
         try {
+          const data = Buffer.concat(chunks).toString('utf8');
           const parsed = JSON.parse(data);
+
+          // Log full error if Claude returned an API error
+          if (parsed.error) {
+            console.error('[CLAUDE] API error:', JSON.stringify(parsed.error));
+            resolve({
+              summary: 'Claude API returned an error. See manageable items for details.',
+              overallRisk: 'MEDIUM',
+              trueRisk: [],
+              manageable: [{
+                item: 'Claude API Error',
+                detail: parsed.error.message || JSON.stringify(parsed.error),
+                folder: 'System',
+                evidence: ''
+              }],
+              clear: [],
+              disclaimer: 'Audit incomplete — please re-run or contact support.'
+            });
+            return;
+          }
+
           const text = parsed.content?.[0]?.text || '';
           console.log('[CLAUDE] Response length:', text.length);
+          console.log('[CLAUDE] Response preview (first 500):', text.substring(0, 500));
+
+          // Strip markdown code fences if present
           const clean = text
             .replace(/^```json\s*/i, '')
             .replace(/^```\s*/i, '')
             .replace(/```\s*$/i, '')
             .trim();
-          const result = JSON.parse(clean);
+
+          // Find the JSON object — handles any preamble text
+          const jsonStart = clean.indexOf('{');
+          const jsonEnd = clean.lastIndexOf('}');
+          if (jsonStart === -1 || jsonEnd === -1) {
+            throw new Error('No JSON object found in Claude response');
+          }
+          const jsonStr = clean.substring(jsonStart, jsonEnd + 1);
+          const result = JSON.parse(jsonStr);
+
           result.trueRisk   = result.trueRisk   || [];
           result.manageable = result.manageable || [];
           result.clear      = result.clear      || [];
+          result.crossReferenceFindings = result.crossReferenceFindings || [];
           result.summary    = result.summary    || 'Audit complete.';
           result.overallRisk = result.overallRisk || 'LOW';
+          result.disclaimer = result.disclaimer || 'Agent review required before COE.';
           resolve(result);
+
         } catch (e) {
           console.error('[CLAUDE] Parse error:', e.message);
-          // Return a structured error rather than crashing
           const rawText = (() => {
-            try { return JSON.parse(data).content?.[0]?.text || data; }
-            catch (x) { return data; }
+            try {
+              const data = Buffer.concat(chunks).toString('utf8');
+              return JSON.parse(data).content?.[0]?.text || data;
+            } catch (x) {
+              return Buffer.concat(chunks).toString('utf8');
+            }
           })();
+          console.error('[CLAUDE] Raw response (first 1000):', rawText.substring(0, 1000));
           resolve({
-            summary: 'Compliance analysis completed but response format error occurred. See manageable items.',
+            summary: 'Compliance analysis completed but response format error occurred. Check Netlify function logs for raw Claude output.',
             overallRisk: 'MEDIUM',
             trueRisk: [],
             manageable: [{
               item: 'Report Parse Error',
-              detail: 'Raw Claude response: ' + rawText.substring(0, 500),
+              detail: 'Claude response could not be parsed as JSON. Check Netlify logs.',
               folder: 'System',
-              evidence: ''
+              evidence: rawText.substring(0, 300)
             }],
             clear: [],
+            crossReferenceFindings: [],
             disclaimer: 'Audit incomplete — please re-run or contact support.'
           });
         }
@@ -772,4 +813,3 @@ function formatReportAsText(folderName, report, submittedBy, auditDate, conditio
 
   return lines.join('\n');
 }
-
