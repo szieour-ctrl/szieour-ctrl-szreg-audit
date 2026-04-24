@@ -756,7 +756,7 @@
 
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.error || 'Audit function returned an error');
+        throw new Error(err.error || `Server error ${res.status}`);
       }
 
       const data = await res.json();
@@ -798,17 +798,23 @@
     // Inventory grid
     const inv = data.inventory || {};
     const invEl = document.getElementById('rptInventory');
-    invEl.innerHTML = ['E1 - Contracts & Addendums', 'E2 - Disclosures & Reports', 'E3 - Inspections & RFR', 'E4 - Title & Escrow', 'E5 - HOA Docs']
-      .map(name => {
-        const key = Object.keys(inv).find(k => k.includes(name.split(' ')[0])) || '';
-        const files = inv[key] || [];
-        const label = name.split(' ')[0];
-        return `<div class="inv-cell">
-          <span class="inv-label">${label}</span>
-          <span class="inv-count">${files.length}</span>
-          <div class="inv-files">${files.length === 1 ? '1 file' : `${files.length} files`}</div>
-        </div>`;
-      }).join('');
+    const eFolders = [
+      { key: 'E1', label: 'E1', desc: 'Contracts' },
+      { key: 'E2', label: 'E2', desc: 'Disclosures' },
+      { key: 'E3', label: 'E3', desc: 'Inspections' },
+      { key: 'E4', label: 'E4', desc: 'Title' },
+      { key: 'E5', label: 'E5', desc: 'HOA' }
+    ];
+    invEl.innerHTML = eFolders.map(ef => {
+      // Match folder by name starting with the E key
+      const matchKey = Object.keys(inv).find(k => k.startsWith(ef.key)) || '';
+      const files = inv[matchKey] || [];
+      return `<div class="inv-cell">
+        <span class="inv-label">${ef.label}</span>
+        <span class="inv-count">${files.length}</span>
+        <div class="inv-files">${ef.desc}</div>
+      </div>`;
+    }).join('');
 
     // Sections
     renderSection('rptRedSection', report.trueRisk || [], '🔴', 'TRUE RISK — Action Required Before COE', 'red');
