@@ -74,6 +74,11 @@ const INVENTORY_PATTERNS = [
 ];
 
 
+// Size thresholds
+const SMALL_FILE_READ_THRESHOLD_KB = 400; // Unknown files under 400KB get read
+const PER_FILE_CAP_KB = 6144;             // 6MB per file hard cap
+const TOTAL_READ_CAP_KB = 51200;          // 50MB total read payload cap
+
 function classifyFile(filename, sizeKB) {
   // Always inventory if matches report/large-doc pattern
   for (const pattern of INVENTORY_PATTERNS) {
