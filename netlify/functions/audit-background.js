@@ -21,51 +21,58 @@ const RE_TRANSACTIONS_FOLDER = '1iuTI1fKo4IZps9hzXLPFoI3TUT3NaCKI';
 
 const READ_PATTERNS = [
   // Contracts
-  /rpa/i, /purchase.?agree/i, /contract/i,
+  /rpa/i, /purchase.?agree/i, /contract/i, /executed.?contract/i,
   /brbc/i, /buyer.?rep/i, /broker.?comp/i,
-  /listing.?agree/i, /\bla\b/i,
-  /agency/i, /\bad\b/i,
-  // Addendums & modifications  
-  /\bcr\b/i, /contingency.?remov/i,
-  /\beta\b/i, /extension/i,
-  /\brfr\b/i, /request.?repair/i, /\brr\b/i,
+  /listing.?agree/i,
+  /agency/i,
+  // Addendums & modifications
+  /contingency.?remov/i, /buyer.?contingency/i,
+  /extension/i, /\beta\b/i,
+  /\brfr\b/i, /request.?repair/i, /request.?for.?repair/i, /rfr#/i,
   /\brrrr\b/i, /seller.?response/i, /repair.?response/i,
-  /addendum/i, /counter.?offer/i, /\bco\b/i,
+  /addendum/i, /counter.?offer/i,
+  /verification.?of.?property/i, /property.?condition/i,
   // Disclosures
   /\btds\b/i, /transfer.?disclos/i,
   /\bspq\b/i, /seller.?property.?quest/i,
   /\bavid\b/i, /visual.?inspect.?disclos/i,
-  /\bnhd\b/i, /natural.?hazard/i,
+  /nhd.?signature/i, /nhd[-_]sig/i,
   /\bsbsa\b/i, /statewide.?buyer/i,
   /\bbia\b/i, /buyer.?inspect.?advis/i,
   /\blpd\b/i, /lead.?based.?paint/i, /lead.?paint/i,
   /\bprbs\b/i, /possible.?rep/i, /dual.?agency/i,
+  /firpta/i, /earthquake/i, /\bwfda\b/i,
+  /disclosure.?cover/i, /sacto.?disclos/i,
   // Title & Escrow (non-report)
-  /commission.?demand/i, /\bcd[-\s]/i, /official.?commission/i,
+  /commission.?demand/i, /szreg.?commission/i, /official.?commission/i,
   /\bemd\b/i, /earnest.?money/i, /deposit.?confirm/i,
   /warranty.?order/i, /home.?warranty/i,
-  /closing.?instruct/i,
+  /closing.?instruct/i, /grant.?deed/i,
+  // Pest clearance — small executed doc, must be read
+  /pest.?clearance/i, /clearance.?cert/i, /section.?1.?clearance/i,
 ];
 
 const INVENTORY_PATTERNS = [
+  // Inspection reports — large scanned files, inventory only
   /inspection.?report/i, /inspect.?report/i,
-  /pest/i, /termite/i, /wood.?destroy/i,
   /home.?inspect/i, /property.?inspect/i,
   /pool.?inspect/i, /spa.?inspect/i,
   /roof.?inspect/i, /sewer.?inspect/i,
   /chimney/i, /hvac/i, /retrofit/i,
+  // Pest REPORTS only (not clearance — clearance is in READ_PATTERNS)
+  /pest.?report/i, /pest.?inspect/i,
+  /termite.?report/i, /termite.?inspect/i,
+  /wood.?destroy/i, /\bwdo\b/i,
+  // Title reports — large files
   /prelim/i, /preliminary.?title/i, /title.?report/i, /title.?search/i,
   /\bptr\b/i,
-  /cc.?r/i, /bylaw/i, /budget/i, /minutes/i, /hoa.?doc/i,
+  // HOA documents
+  /cc.?r/i, /bylaw/i, /hoa.?budget/i, /hoa.?minutes/i, /hoa.?doc/i,
   /financ.?state/i, /reserve.?study/i,
+  // NHD full report (large) — signature pages are small and readable
+  /nhd.?full/i, /nhd.?report/i,
 ];
 
-// Small files (under 400KB) are almost always text-based — read them regardless of name
-const SMALL_FILE_READ_THRESHOLD_KB = 400;
-// Hard cap per file sent to OpenAI
-const PER_FILE_CAP_KB = 6144; // 6MB
-// Total payload cap across all read files
-const TOTAL_READ_CAP_KB = 51200; // 50MB
 
 function classifyFile(filename, sizeKB) {
   // Always inventory if matches report/large-doc pattern
@@ -499,6 +506,24 @@ function mergeBatchResults(results) {
 
   merged.overallRisk = highestRisk;
   merged.summary = merged.summaries.join(' | ');
+
+  // Deduplicate cross-reference findings by check description
+  const seenChecks = new Set();
+  merged.crossReferenceFindings = merged.crossReferenceFindings.filter(c => {
+    const key = (c.check || '').toLowerCase().trim();
+    if (seenChecks.has(key)) return false;
+    seenChecks.add(key);
+    return true;
+  });
+
+  // Deduplicate clear items by item name
+  const seenClear = new Set();
+  merged.clear = merged.clear.filter(c => {
+    const key = (c.item || '').toLowerCase().trim();
+    if (seenClear.has(key)) return false;
+    seenClear.add(key);
+    return true;
+  });
 
   return merged;
 }
