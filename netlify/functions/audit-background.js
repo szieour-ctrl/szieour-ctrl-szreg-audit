@@ -2,26 +2,85 @@
  * SZREG AI Compliance Audit — Netlify Background Function
  * File: netlify/functions/audit-background.js
  *
- * Background functions run up to 15 minutes — no timeout concern.
- * Triggered by form submission, fires Pabbly webhook when complete.
- *
- * Flow:
- *  1. Parse intake payload
- *  2. Authenticate to Google Drive
- *  3. Navigate to transaction folder → Active Transaction → Executed Docs
- *  4. Download every PDF in E1–E5 as base64
- *  5. Send all documents + compliance prompt to Claude
- *  6. POST structured report to Pabbly webhook
+ * Architecture: Hybrid Compliance Read + Inventory
+ *  - Filename + size classification determines READ vs INVENTORY for every file
+ *  - Folder structure is irrelevant — AI decides per file
+ *  - E1/E2/E4 contract & disclosure docs → full OpenAI GPT-4o read
+ *  - Large reports, title, HOA → inventory confirm only
+ *  - Fires Pabbly webhook with completed report when done
  */
 
 const https = require('https');
 
-// ─── Pabbly webhook URL ───────────────────────────────────────────────────────
-// Replace with your actual Pabbly webhook URL for the compliance report workflow
+// ─── Config ───────────────────────────────────────────────────────────────────
 const PABBLY_WEBHOOK_URL = 'https://connect.pabbly.com/workflow/sendwebhookdata/IjU3NjcwNTZlMDYzNDA0MzU1MjY4NTUzNTUxMzQi_pc';
-
-// ─── Google Drive folder ID ───────────────────────────────────────────────────
 const RE_TRANSACTIONS_FOLDER = '1iuTI1fKo4IZps9hzXLPFoI3TUT3NaCKI';
+
+// ─── File classification ──────────────────────────────────────────────────────
+// Determines READ vs INVENTORY for every file, regardless of folder
+
+const READ_PATTERNS = [
+  // Contracts
+  /rpa/i, /purchase.?agree/i, /contract/i,
+  /brbc/i, /buyer.?rep/i, /broker.?comp/i,
+  /listing.?agree/i, /\bla\b/i,
+  /agency/i, /\bad\b/i,
+  // Addendums & modifications  
+  /\bcr\b/i, /contingency.?remov/i,
+  /\beta\b/i, /extension/i,
+  /\brfr\b/i, /request.?repair/i, /\brr\b/i,
+  /\brrrr\b/i, /seller.?response/i, /repair.?response/i,
+  /addendum/i, /counter.?offer/i, /\bco\b/i,
+  // Disclosures
+  /\btds\b/i, /transfer.?disclos/i,
+  /\bspq\b/i, /seller.?property.?quest/i,
+  /\bavid\b/i, /visual.?inspect.?disclos/i,
+  /\bnhd\b/i, /natural.?hazard/i,
+  /\bsbsa\b/i, /statewide.?buyer/i,
+  /\bbia\b/i, /buyer.?inspect.?advis/i,
+  /\blpd\b/i, /lead.?based.?paint/i, /lead.?paint/i,
+  /\bprbs\b/i, /possible.?rep/i, /dual.?agency/i,
+  // Title & Escrow (non-report)
+  /commission.?demand/i, /\bcd[-\s]/i, /official.?commission/i,
+  /\bemd\b/i, /earnest.?money/i, /deposit.?confirm/i,
+  /warranty.?order/i, /home.?warranty/i,
+  /closing.?instruct/i,
+];
+
+const INVENTORY_PATTERNS = [
+  /inspection.?report/i, /inspect.?report/i,
+  /pest/i, /termite/i, /wood.?destroy/i,
+  /home.?inspect/i, /property.?inspect/i,
+  /pool.?inspect/i, /spa.?inspect/i,
+  /roof.?inspect/i, /sewer.?inspect/i,
+  /chimney/i, /hvac/i, /retrofit/i,
+  /prelim/i, /preliminary.?title/i, /title.?report/i, /title.?search/i,
+  /\bptr\b/i,
+  /cc.?r/i, /bylaw/i, /budget/i, /minutes/i, /hoa.?doc/i,
+  /financ.?state/i, /reserve.?study/i,
+];
+
+// Small files (under 400KB) are almost always text-based — read them regardless of name
+const SMALL_FILE_READ_THRESHOLD_KB = 400;
+// Hard cap per file sent to OpenAI
+const PER_FILE_CAP_KB = 6144; // 6MB
+// Total payload cap across all read files
+const TOTAL_READ_CAP_KB = 51200; // 50MB
+
+function classifyFile(filename, sizeKB) {
+  // Always inventory if matches report/large-doc pattern
+  for (const pattern of INVENTORY_PATTERNS) {
+    if (pattern.test(filename)) return 'INVENTORY';
+  }
+  // Always read if matches contract/disclosure pattern
+  for (const pattern of READ_PATTERNS) {
+    if (pattern.test(filename)) return 'READ';
+  }
+  // Small unknown file — read it, probably a contract
+  if (sizeKB < SMALL_FILE_READ_THRESHOLD_KB) return 'READ';
+  // Large unknown file — inventory only
+  return 'INVENTORY';
+}
 
 // ─── Google Auth ──────────────────────────────────────────────────────────────
 
@@ -33,37 +92,28 @@ function base64url(str) {
 async function getGoogleAccessToken() {
   const rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
   if (!rawKey) throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY not set');
-
   let key;
-  try {
-    key = JSON.parse(rawKey);
-  } catch (e) {
-    try {
-      key = JSON.parse(rawKey.trim().replace(/^"|"$/g, ''));
-    } catch (e2) {
-      throw new Error('Failed to parse GOOGLE_SERVICE_ACCOUNT_KEY');
-    }
+  try { key = JSON.parse(rawKey); }
+  catch (e) {
+    try { key = JSON.parse(rawKey.trim().replace(/^"|"$/g, '')); }
+    catch (e2) { throw new Error('Failed to parse GOOGLE_SERVICE_ACCOUNT_KEY'); }
   }
-
   const privateKey = key.private_key.replace(/\\n/g, '\n');
   const now = Math.floor(Date.now() / 1000);
   const header = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
   const claim = base64url(JSON.stringify({
     iss: key.client_email,
-    // Need both readonly and drive scope to download file content
     scope: 'https://www.googleapis.com/auth/drive.readonly',
     aud: 'https://oauth2.googleapis.com/token',
     exp: now + 3600,
     iat: now
   }));
-
   const { createSign } = require('crypto');
   const sign = createSign('RSA-SHA256');
   sign.update(`${header}.${claim}`);
   const sig = sign.sign(privateKey, 'base64')
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
   const jwt = `${header}.${claim}.${sig}`;
-
   return new Promise((resolve, reject) => {
     const body = `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`;
     const req = https.request({
@@ -86,7 +136,7 @@ async function getGoogleAccessToken() {
   });
 }
 
-// ─── Drive API helpers ────────────────────────────────────────────────────────
+// ─── Drive helpers ────────────────────────────────────────────────────────────
 
 function driveRequest(path, token) {
   return new Promise((resolve, reject) => {
@@ -118,7 +168,6 @@ async function listFolderContents(folderId, token) {
   return result.files || [];
 }
 
-// Download a file from Drive as base64
 async function downloadFileAsBase64(fileId, token) {
   return new Promise((resolve, reject) => {
     const req = https.request({
@@ -129,17 +178,14 @@ async function downloadFileAsBase64(fileId, token) {
     }, res => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
-      res.on('end', () => {
-        const buffer = Buffer.concat(chunks);
-        resolve(buffer.toString('base64'));
-      });
+      res.on('end', () => resolve(Buffer.concat(chunks).toString('base64')));
     });
     req.on('error', reject);
     req.end();
   });
 }
 
-// ─── HTTP POST helper (for Pabbly webhook) ───────────────────────────────────
+// ─── HTTP POST helper ─────────────────────────────────────────────────────────
 
 function postJSON(urlString, payload) {
   return new Promise((resolve, reject) => {
@@ -167,21 +213,11 @@ function postJSON(urlString, payload) {
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
 exports.handler = async (event) => {
-  // Background functions must return 202 immediately — processing happens async
-  // But we still do the work inside the handler (Netlify handles the background execution)
-
   const body = JSON.parse(event.body || '{}');
   const {
-    lastNameSearch,
-    transactionType,
-    yearBuilt,
-    hoaPresent,
-    poolPresent,
-    dualAgency,
-    community55plus,
-    submittedBy,
-    agentEmail,
-    auditDate
+    lastNameSearch, transactionType, yearBuilt,
+    hoaPresent, poolPresent, dualAgency, community55plus,
+    submittedBy, agentEmail, auditDate
   } = body;
 
   console.log(`[AUDIT] Starting compliance audit for: ${lastNameSearch}`);
@@ -189,7 +225,7 @@ exports.handler = async (event) => {
   try {
     // ── 1. Authenticate ───────────────────────────────────────────────────────
     const token = await getGoogleAccessToken();
-    console.log('[AUDIT] Google auth successful');
+    console.log('[AUDIT] Google auth OK');
 
     // ── 2. Find transaction folder ────────────────────────────────────────────
     const typeKeyword = transactionType === 'BUYER' ? 'Buyer' : 'Listing';
@@ -197,142 +233,89 @@ exports.handler = async (event) => {
       `'${RE_TRANSACTIONS_FOLDER}' in parents and name contains '${lastNameSearch}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
     );
     const searchResult = await driveRequest(
-      `/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=10`,
-      token
+      `/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=10`, token
     );
-
     const folders = searchResult.files || [];
-    if (folders.length === 0) {
-      await postJSON(PABBLY_WEBHOOK_URL, {
-        status: 'error',
-        error: `No transaction folder found for "${lastNameSearch}"`,
-        submittedBy,
-        agentEmail,
-        auditDate
-      });
+    if (!folders.length) {
+      await postJSON(PABBLY_WEBHOOK_URL, { status: 'error', error: `No folder found for "${lastNameSearch}"`, submittedBy, agentEmail, auditDate });
       return { statusCode: 202 };
     }
-
     const txFolder = folders.find(f => f.name.includes(typeKeyword)) || folders[0];
-    console.log(`[AUDIT] Found folder: ${txFolder.name}`);
+    console.log(`[AUDIT] Folder: ${txFolder.name}`);
 
     // ── 3. Navigate to Executed Docs ──────────────────────────────────────────
     const parentContents = await listFolderContents(txFolder.id, token);
-
     const activeTransaction = parentContents.find(f =>
       f.name.includes('Active Transaction') && f.mimeType === 'application/vnd.google-apps.folder'
     );
     if (!activeTransaction) {
-      await postJSON(PABBLY_WEBHOOK_URL, {
-        status: 'error',
-        error: `Active Transaction folder not found in ${txFolder.name}`,
-        folderName: txFolder.name,
-        submittedBy,
-        agentEmail,
-        auditDate
-      });
+      await postJSON(PABBLY_WEBHOOK_URL, { status: 'error', error: `Active Transaction folder not found in ${txFolder.name}`, folderName: txFolder.name, submittedBy, agentEmail, auditDate });
       return { statusCode: 202 };
     }
-
     const atContents = await listFolderContents(activeTransaction.id, token);
     const execDocs = atContents.find(f =>
       f.name.includes('Executed Docs') && f.mimeType === 'application/vnd.google-apps.folder'
     );
     if (!execDocs) {
-      await postJSON(PABBLY_WEBHOOK_URL, {
-        status: 'error',
-        error: `Executed Docs folder not found — has Offer Accepted been run?`,
-        folderName: txFolder.name,
-        submittedBy,
-        agentEmail,
-        auditDate
-      });
+      await postJSON(PABBLY_WEBHOOK_URL, { status: 'error', error: `Executed Docs folder not found — has Offer Accepted been run?`, folderName: txFolder.name, submittedBy, agentEmail, auditDate });
       return { statusCode: 202 };
     }
 
-    // ── 4. Download all PDFs from E1–E5 ──────────────────────────────────────
+    // ── 4. Inventory all files, classify each one ─────────────────────────────
     const eSubfolders = await listFolderContents(execDocs.id, token);
-    const documentsBySection = {};
-    const claudeDocuments = []; // Array of {source, type, folder, filename} for Claude API
+    const allFiles = []; // { folder, filename, fileId, sizeKB, classification }
 
     for (const subfolder of eSubfolders) {
       if (subfolder.mimeType !== 'application/vnd.google-apps.folder') continue;
-
-      const sectionLabel = subfolder.name;
       const files = await listFolderContents(subfolder.id, token);
-      documentsBySection[sectionLabel] = [];
-
-      console.log(`[AUDIT] Processing ${sectionLabel}: ${files.length} files`);
-
+      console.log(`[AUDIT] ${subfolder.name}: ${files.length} files`);
       for (const file of files) {
         if (file.mimeType === 'application/vnd.google-apps.folder') continue;
-
-        // Only download PDFs and common document types
-        const isPDF = file.mimeType === 'application/pdf' ||
-                      file.name.toLowerCase().endsWith('.pdf');
-        const isDoc = file.mimeType === 'application/vnd.google-apps.document';
-
-        const fileSizeKB = parseInt(file.size || 0) / 1024;
-
-        documentsBySection[sectionLabel].push({
-          name: file.name,
-          sizeKB: Math.round(fileSizeKB),
-          type: isPDF ? 'pdf' : file.mimeType
+        const isPDF = file.mimeType === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+        if (!isPDF) continue;
+        const sizeKB = parseInt(file.size || 0) / 1024;
+        const classification = classifyFile(file.name, sizeKB);
+        allFiles.push({
+          folder: subfolder.name,
+          filename: file.name,
+          fileId: file.id,
+          sizeKB: Math.round(sizeKB),
+          classification
         });
-
-        // Per-file cap: 8MB max per document (OpenAI handles larger payloads than Claude)
-        const PER_FILE_CAP_KB = 8192;
-
-        if (isPDF && fileSizeKB < PER_FILE_CAP_KB) {
-          try {
-            const base64Data = await downloadFileAsBase64(file.id, token);
-            claudeDocuments.push({
-              folder: sectionLabel,
-              filename: file.name,
-              sizeKB: Math.round(fileSizeKB),
-              base64: base64Data
-            });
-            console.log(`[AUDIT] Downloaded: ${file.name} (${Math.round(fileSizeKB)}KB)`);
-          } catch (dlErr) {
-            console.error(`[AUDIT] Failed to download ${file.name}:`, dlErr.message);
-            claudeDocuments.push({
-              folder: sectionLabel,
-              filename: file.name,
-              sizeKB: Math.round(fileSizeKB),
-              base64: null,
-              downloadError: dlErr.message
-            });
-          }
-        } else if (isPDF) {
-          claudeDocuments.push({
-            folder: sectionLabel,
-            filename: file.name,
-            sizeKB: Math.round(fileSizeKB),
-            base64: null,
-            downloadError: `File is ${Math.round(fileSizeKB)}KB — exceeds 2MB limit. Likely scanned. Presence confirmed by filename only.`
-          });
-          console.log(`[AUDIT] Skipped (too large): ${file.name} (${Math.round(fileSizeKB)}KB)`);
-        }
+        console.log(`[AUDIT] ${classification}: ${file.name} (${Math.round(sizeKB)}KB)`);
       }
     }
 
-    // Total payload guard — drop largest files if cumulative base64 exceeds 12MB
-    const TOTAL_CAP_KB = 40960; // 40MB total — OpenAI handles this comfortably
-    let runningTotal = 0;
-    for (const doc of claudeDocuments) {
-      if (!doc.base64) continue;
-      const docKB = doc.base64.length / 1024;
-      runningTotal += docKB;
-      if (runningTotal > TOTAL_CAP_KB) {
-        console.log(`[AUDIT] Total cap reached — dropping: ${doc.filename}`);
-        doc.downloadError = 'Excluded — total payload cap reached. Presence confirmed by filename only.';
-        doc.base64 = null;
+    // ── 5. Download READ-classified files ─────────────────────────────────────
+    let totalReadKB = 0;
+    for (const file of allFiles) {
+      if (file.classification !== 'READ') continue;
+      if (file.sizeKB > PER_FILE_CAP_KB) {
+        file.classification = 'INVENTORY';
+        file.skipReason = `File is ${file.sizeKB}KB — exceeds ${PER_FILE_CAP_KB}KB per-file limit. Reclassified to inventory.`;
+        continue;
+      }
+      if (totalReadKB + file.sizeKB > TOTAL_READ_CAP_KB) {
+        file.classification = 'INVENTORY';
+        file.skipReason = 'Total read payload cap reached. Reclassified to inventory.';
+        continue;
+      }
+      try {
+        file.base64 = await downloadFileAsBase64(file.fileId, token);
+        totalReadKB += file.sizeKB;
+        console.log(`[AUDIT] Downloaded: ${file.filename} (${file.sizeKB}KB) — running total: ${Math.round(totalReadKB)}KB`);
+      } catch (err) {
+        file.classification = 'INVENTORY';
+        file.skipReason = `Download failed: ${err.message}`;
+        console.error(`[AUDIT] Download failed: ${file.filename}`, err.message);
       }
     }
 
-    console.log(`[AUDIT] Total documents found: ${claudeDocuments.length}, readable: ${claudeDocuments.filter(d => d.base64).length}`);
+    const readFiles = allFiles.filter(f => f.classification === 'READ' && f.base64);
+    const inventoryFiles = allFiles.filter(f => f.classification === 'INVENTORY');
+    console.log(`[AUDIT] READ: ${readFiles.length} files (${Math.round(totalReadKB)}KB) | INVENTORY: ${inventoryFiles.length} files`);
 
-    // ── 5. Build Claude compliance prompt ────────────────────────────────────
+    // ── 6. Build conditions object ────────────────────────────────────────────
     const conditions = {
       transactionType,
       yearBuilt,
@@ -343,21 +326,20 @@ exports.handler = async (event) => {
       community55plus: community55plus === 'yes'
     };
 
-    const auditReport = await callClaudeWithDocuments(
-      txFolder.name,
-      conditions,
-      claudeDocuments,
-      submittedBy
-    );
+    // ── 7. Call OpenAI with read files + inventory list ───────────────────────
+    const auditReport = await callOpenAI(txFolder.name, conditions, readFiles, inventoryFiles, submittedBy);
+    console.log('[AUDIT] OpenAI analysis complete');
 
-    console.log('[AUDIT] Claude compliance analysis complete');
+    // ── 8. Build inventory summary ────────────────────────────────────────────
+    const inventorySummary = [
+      `READ & AUDITED (${readFiles.length} files):`,
+      ...readFiles.map(f => `  ✅ [${f.folder}] ${f.filename} (${f.sizeKB}KB)`),
+      '',
+      `INVENTORY ONLY (${inventoryFiles.length} files):`,
+      ...inventoryFiles.map(f => `  📋 [${f.folder}] ${f.filename} (${f.sizeKB}KB)${f.skipReason ? ' — ' + f.skipReason : ''}`)
+    ].join('\n');
 
-    // ── 6. Build inventory summary for Pabbly ────────────────────────────────
-    const inventorySummary = Object.entries(documentsBySection).map(([folder, files]) => {
-      return `${folder} (${files.length} files):\n${files.map(f => `  • ${f.name} (${f.sizeKB}KB)`).join('\n')}`;
-    }).join('\n\n');
-
-    // ── 7. Fire Pabbly webhook with completed report ──────────────────────────
+    // ── 9. Fire Pabbly ────────────────────────────────────────────────────────
     await postJSON(PABBLY_WEBHOOK_URL, {
       status: 'complete',
       folderName: txFolder.name,
@@ -368,69 +350,49 @@ exports.handler = async (event) => {
       transactionType,
       conditions,
       inventorySummary,
+      readCount: readFiles.length,
+      inventoryCount: inventoryFiles.length,
       report: auditReport,
-      // Pre-formatted for Google Doc / email
-      reportFormatted: formatReportAsText(txFolder.name, auditReport, submittedBy, auditDate, conditions)
+      reportFormatted: formatReport(txFolder.name, auditReport, submittedBy, auditDate, conditions, readFiles.length, inventoryFiles.length)
     });
 
-    console.log('[AUDIT] Pabbly webhook fired — audit complete');
+    console.log('[AUDIT] Pabbly webhook fired — done');
     return { statusCode: 202 };
 
   } catch (err) {
-    console.error('[AUDIT] Fatal error:', err.message, err.stack);
-
-    // Notify via Pabbly even on error
+    console.error('[AUDIT] Fatal error:', err.message);
     try {
       await postJSON(PABBLY_WEBHOOK_URL, {
         status: 'error',
         error: err.message,
-        submittedBy,
-        agentEmail,
-        auditDate,
+        submittedBy, agentEmail, auditDate,
         folderName: lastNameSearch
       });
-    } catch (webhookErr) {
-      console.error('[AUDIT] Could not fire error webhook:', webhookErr.message);
-    }
-
+    } catch (e) { console.error('[AUDIT] Webhook error notify failed:', e.message); }
     return { statusCode: 202 };
   }
 };
 
-// ─── OpenAI API call with actual document content ────────────────────────────
+// ─── OpenAI call ──────────────────────────────────────────────────────────────
 
-async function callClaudeWithDocuments(folderName, conditions, documents, submittedBy) {
-  // Build the compliance prompt
-  const prompt = buildCompliancePrompt(folderName, conditions, submittedBy, documents);
+async function callOpenAI(folderName, conditions, readFiles, inventoryFiles, submittedBy) {
+  const prompt = buildPrompt(folderName, conditions, submittedBy, readFiles, inventoryFiles);
 
-  // Build content array — text prompt first, then PDF documents as base64
-  const userContent = [];
+  // Build message content — prompt first, then each PDF
+  const userContent = [{ type: 'text', text: prompt }];
 
-  userContent.push({
-    type: 'text',
-    text: prompt
-  });
-
-  // Attach each readable PDF — OpenAI accepts PDFs via file content blocks
-  let documentsAttached = 0;
-  for (const doc of documents) {
-    if (doc.base64) {
-      userContent.push({
-        type: 'text',
-        text: `[ATTACHED DOCUMENT — ${doc.folder}: ${doc.filename} (${doc.sizeKB}KB) — Read the full content of this PDF and use it in your compliance analysis]`
-      });
-      userContent.push({
-        type: 'file',
-        file: {
-          filename: doc.filename,
-          file_data: `data:application/pdf;base64,${doc.base64}`
-        }
-      });
-      documentsAttached++;
-    }
+  for (const doc of readFiles) {
+    userContent.push({
+      type: 'text',
+      text: `\n--- DOCUMENT: [${doc.folder}] ${doc.filename} (${doc.sizeKB}KB) ---`
+    });
+    userContent.push({
+      type: 'image_url',
+      image_url: { url: `data:application/pdf;base64,${doc.base64}`, detail: 'high' }
+    });
   }
 
-  console.log(`[OPENAI] Sending ${documentsAttached} documents for analysis`);
+  console.log(`[OPENAI] Sending ${readFiles.length} documents`);
 
   return new Promise((resolve, reject) => {
     const requestBody = JSON.stringify({
@@ -439,12 +401,9 @@ async function callClaudeWithDocuments(folderName, conditions, documents, submit
       messages: [
         {
           role: 'system',
-          content: 'You are the SZREG AI Compliance Auditor for SZ Real Estate Group. You perform rigorous transaction compliance reviews by reading actual documents — not guessing from filenames. You identify True Risks (missing documents, blank signatures, unexecuted forms), Manageable Items (minor issues needing verification), and confirm Clear items with specific evidence from the documents you read. You are thorough, precise, and never infer — you only report what you can actually verify from document content. Always respond with valid JSON only — no preamble, no markdown.'
+          content: 'You are the SZREG AI Compliance Auditor for SZ Real Estate Group. You read actual transaction documents and perform rigorous compliance review. You never guess or infer — you only report what you can directly verify from document content. Always respond with valid JSON only. No preamble, no markdown, no explanation outside the JSON structure.'
         },
-        {
-          role: 'user',
-          content: userContent
-        }
+        { role: 'user', content: userContent }
       ]
     });
 
@@ -463,111 +422,62 @@ async function callClaudeWithDocuments(folderName, conditions, documents, submit
         try {
           const data = Buffer.concat(chunks).toString('utf8');
           const parsed = JSON.parse(data);
-
-          // Check for OpenAI API error
           if (parsed.error) {
             console.error('[OPENAI] API error:', JSON.stringify(parsed.error));
-            resolve({
-              summary: 'OpenAI API returned an error: ' + (parsed.error.message || JSON.stringify(parsed.error)),
-              overallRisk: 'MEDIUM',
-              trueRisk: [],
-              manageable: [{
-                item: 'OpenAI API Error',
-                detail: parsed.error.message || JSON.stringify(parsed.error),
-                folder: 'System',
-                evidence: ''
-              }],
-              clear: [],
-              crossReferenceFindings: [],
-              disclaimer: 'Audit incomplete — please re-run or contact support.'
-            });
+            resolve(errorReport('OpenAI API error: ' + (parsed.error.message || JSON.stringify(parsed.error))));
             return;
           }
-
           const text = parsed.choices?.[0]?.message?.content || '';
           console.log('[OPENAI] Response length:', text.length);
-          console.log('[OPENAI] Response preview (first 500):', text.substring(0, 500));
-
-          // Strip markdown code fences if present
-          const clean = text
-            .replace(/^```json\s*/i, '')
-            .replace(/^```\s*/i, '')
-            .replace(/```\s*$/i, '')
-            .trim();
-
-          // Find JSON object — handles any preamble
+          const clean = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
           const jsonStart = clean.indexOf('{');
           const jsonEnd = clean.lastIndexOf('}');
-          if (jsonStart === -1 || jsonEnd === -1) {
-            throw new Error('No JSON object found in OpenAI response');
-          }
-          const jsonStr = clean.substring(jsonStart, jsonEnd + 1);
-          const result = JSON.parse(jsonStr);
-
+          if (jsonStart === -1 || jsonEnd === -1) throw new Error('No JSON in response');
+          const result = JSON.parse(clean.substring(jsonStart, jsonEnd + 1));
           result.trueRisk            = result.trueRisk            || [];
           result.manageable          = result.manageable          || [];
           result.clear               = result.clear               || [];
+          result.inventoryConfirmed  = result.inventoryConfirmed  || [];
           result.crossReferenceFindings = result.crossReferenceFindings || [];
           result.summary             = result.summary             || 'Audit complete.';
           result.overallRisk         = result.overallRisk         || 'LOW';
           result.disclaimer          = result.disclaimer          || 'Agent review required before COE.';
           resolve(result);
-
         } catch (e) {
           console.error('[OPENAI] Parse error:', e.message);
-          const rawText = (() => {
-            try {
-              const data = Buffer.concat(chunks).toString('utf8');
-              return JSON.parse(data).choices?.[0]?.message?.content || data;
-            } catch (x) {
-              return Buffer.concat(chunks).toString('utf8');
-            }
-          })();
-          console.error('[OPENAI] Raw response (first 1000):', rawText.substring(0, 1000));
-          resolve({
-            summary: 'Compliance analysis completed but response format error occurred.',
-            overallRisk: 'MEDIUM',
-            trueRisk: [],
-            manageable: [{
-              item: 'Report Parse Error',
-              detail: 'OpenAI response could not be parsed as JSON.',
-              folder: 'System',
-              evidence: rawText.substring(0, 300)
-            }],
-            clear: [],
-            crossReferenceFindings: [],
-            disclaimer: 'Audit incomplete — please re-run or contact support.'
-          });
+          const raw = (() => { try { return Buffer.concat(chunks).toString('utf8'); } catch(x) { return ''; } })();
+          console.error('[OPENAI] Raw (first 1000):', raw.substring(0, 1000));
+          resolve(errorReport('Response parse error: ' + e.message));
         }
       });
     });
-    req.on('error', reject);
+    req.on('error', err => { console.error('[OPENAI] Request error:', err.message); resolve(errorReport(err.message)); });
     req.write(requestBody);
     req.end();
   });
 }
 
-// ─── Compliance prompt builder ────────────────────────────────────────────────
+function errorReport(detail) {
+  return {
+    summary: 'Audit encountered an error. See manageable items.',
+    overallRisk: 'MEDIUM',
+    trueRisk: [],
+    manageable: [{ item: 'Audit Error', detail, folder: 'System', evidence: '' }],
+    clear: [],
+    inventoryConfirmed: [],
+    crossReferenceFindings: [],
+    disclaimer: 'Audit incomplete — please re-run or contact support.'
+  };
+}
 
-function buildCompliancePrompt(folderName, conditions, submittedBy, documents) {
+// ─── Compliance prompt ────────────────────────────────────────────────────────
+
+function buildPrompt(folderName, conditions, submittedBy, readFiles, inventoryFiles) {
   const { transactionType, yearBuilt, isPreX1978, hoaPresent, poolPresent, dualAgency, community55plus } = conditions;
   const isBuyer = transactionType === 'BUYER';
 
-  // List documents that couldn't be read (download failures or oversized)
-  const unreadable = documents.filter(d => !d.base64);
-  const unreadableNote = unreadable.length > 0
-    ? `\nNOTE — The following files could not be read (presence confirmed by filename only):\n${unreadable.map(d => `  • [${d.folder}] ${d.filename} — ${d.downloadError}`).join('\n')}\n`
-    : '';
-
-  // Map of all documents by folder for reference
-  const docInventory = {};
-  for (const doc of documents) {
-    if (!docInventory[doc.folder]) docInventory[doc.folder] = [];
-    docInventory[doc.folder].push(`${doc.filename} (${doc.sizeKB}KB)${doc.base64 ? ' [READABLE]' : ' [FILENAME ONLY]'}`);
-  }
-  const inventoryText = Object.entries(docInventory).map(([folder, files]) =>
-    `${folder}:\n${files.map(f => `  • ${f}`).join('\n')}`
-  ).join('\n\n');
+  const readList = readFiles.map(f => `  • [${f.folder}] ${f.filename} (${f.sizeKB}KB) — ATTACHED, READ THIS DOCUMENT`).join('\n');
+  const inventoryList = inventoryFiles.map(f => `  • [${f.folder}] ${f.filename} (${f.sizeKB}KB) — NOT ATTACHED, confirm presence only`).join('\n');
 
   return `SZREG AI COMPLIANCE AUDIT
 Transaction: ${folderName}
@@ -575,201 +485,114 @@ Submitted by: ${submittedBy}
 Type: ${isBuyer ? 'Buyer Representation' : 'Seller Representation'}
 Year Built: ${yearBuilt || 'Not provided'}
 Conditions: Pre-1978=${isPreX1978 ? 'YES' : 'No'} | HOA=${hoaPresent ? 'YES' : 'No'} | Pool=${poolPresent ? 'YES' : 'No'} | Dual Agency=${dualAgency ? 'YES' : 'No'} | 55+=${community55plus ? 'YES' : 'No'}
-${unreadableNote}
-DOCUMENT INVENTORY (all files found in E1–E5):
-${inventoryText}
-
-ALL READABLE DOCUMENTS ARE ATTACHED. You have the actual PDF content for each [READABLE] file above.
 
 ═══════════════════════════════════════════════════════
-YOUR COMPLIANCE TASK — READ THE ACTUAL DOCUMENTS
+HYBRID AUDIT — TWO MODES
 ═══════════════════════════════════════════════════════
 
-For each required document below, you MUST:
-1. Open and read the actual attached PDF
-2. Confirm specific evidence: party names, dates, signature presence, Authentisign/DocuSign IDs
-3. Cross-reference where required (commission % vs RPA, party names consistent across docs)
-4. Never infer or guess — only report what you can actually read
+MODE 1 — FULL COMPLIANCE READ (documents attached below):
+${readList || '  (none)'}
 
-REQUIRED DOCUMENTS & WHAT TO VERIFY:
+For each attached document:
+  • Read the actual content
+  • Verify party names, dates, signatures, Authentisign/DocuSign IDs
+  • Cross-reference commission %, party name consistency, property address
+  • Report findings with specific evidence — never infer
 
-━━━ E1 — CONTRACTS & ADDENDUMS ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Residential Purchase Agreement (RPA)
-  - Verify: Buyer and Seller names on page 1, property address, purchase price, closing date
-  - Note: commission percentage agreed — cross-reference with Commission Demand Letter
-  - Verify: executed (Authentisign ID or DocuSign envelope ID present, or wet signatures with dates)
+MODE 2 — INVENTORY CONFIRM (not attached — filename only):
+${inventoryList || '  (none)'}
 
-• ${isBuyer ? 'Buyer Representation & Broker Compensation (BRBC)' : 'Listing Agreement (LA)'}
-  - Verify: client name matches RPA, agent/broker name, commission terms, execution status
-
-• Agency Disclosure (AD)
-  - Verify: present and executed by all parties
-
-• Contingency Removal (CR-B or CR)
-  - Verify: present if applicable, contingencies listed, executed
-
-• Request for Repair (RR/RFR) — if present
-  - Verify: repair items listed, dollar amounts, executed by requesting party
-  - CRITICAL: Note whether pest clearance or pest work was included in any RFR
-  - Note total repair credit or work agreed to
-
-• Seller Response to RFR (RRRR) — if RFR was submitted
-  - Verify: response matches RFR items, executed
-
-• Extension of Time (ETA) — if present
-  - Verify: new dates, executed by all parties
-
-━━━ E2 — DISCLOSURES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Transfer Disclosure Statement (TDS)
-  - Verify: seller names match RPA, property address, all sections completed
-  - Verify: agent inspection section completed by listing agent
-  - Verify: executed by all sellers and buyers
-
-• Seller Property Questionnaire (SPQ)
-  - Verify: present (may be a standalone file or bundled in a disclosure compilation)
-  - Verify: seller names, executed
-
-• Agent Visual Inspection Disclosure (AVID)
-  - Verify: agent name, property address, completed inspection items, executed
-
-• Natural Hazard Disclosure (NHD)
-  - Verify: present (may be in a combined disclosure package)
-  - Verify: property address matches, executed
-
-• Statewide Buyer & Seller Advisory (SBSA)
-  - Verify: present (may be in a combined disclosure package)
-  - Verify: executed
-
-• Buyer's Inspection Advisory (BIA)
-  - Verify: present (may be in a combined disclosure package)
-  - Verify: executed
-
-${isPreX1978 ? `• ⚠️ REQUIRED — Lead-Based Paint Disclosure (LPD) — PRE-1978 PROPERTY
-  - Verify: present and executed by all parties
-  - Verify: property address, seller acknowledgment, buyer acknowledgment` : ''}
-
-${hoaPresent ? `• ⚠️ REQUIRED — HOA Documents Package
-  - Verify: CC&Rs, Bylaws, Budget, Meeting Minutes present
-  - Note any missing HOA documents` : ''}
-
-${dualAgency ? `• ⚠️ REQUIRED — Possible Representation of Both (PRBS)
-  - Verify: present, executed by all parties` : ''}
-
-━━━ E3 — INSPECTIONS & RFR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Pest Inspection Report
-  - Verify: property address, inspector name/license, date
-  - CRITICAL: Note whether Section 1 items were found or if report is clear
-  - If Section 1 items found: clearance certificate IS required (especially if negotiated in RFR)
-  - If report is clear (no Section 1): clearance certificate is NOT required
-
-• Pest Section 1 Clearance Certificate — ONLY required if Section 1 items were found AND clearance was negotiated
-  - If pest report shows Section 1 items AND an RFR addressed pest work: verify clearance cert is present
-  - If pest report is clear: mark this as N/A — Not Required
-
-• Home Inspection Report
-  - Verify: property address, inspector, date, report present and complete
-
-${poolPresent ? `• ⚠️ REQUIRED — Pool/Spa Inspection Report
-  - Verify: present, covers pool and/or spa` : ''}
-
-━━━ E4 — TITLE & ESCROW ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Preliminary Title Report
-  - Verify: property address, vesting, any liens or encumbrances noted
-
-• Earnest Money Deposit (EMD) confirmation
-  - Verify: amount matches RPA, deposit confirmed by escrow
-
-• Commission Demand Letter
-  - IMPORTANT: SZ Real Estate Group uses their own branded "Official Commission Demand Letter"
-  - The document may be filed as "CD-[address]", "Commission Demand", or similar
-  - Verify: commission percentage matches RPA, broker name (John P. Klein / SZ Real Estate Group)
-  - Verify: executed with Authentisign ID or broker signature
-  - Verify: disbursement instructions present
-
-• Home Warranty Order
-  - Verify: present, property address, plan type if visible
-
-━━━ E5 — HOA DOCS (if HOA present) ━━━━━━━━━━━━━━━━━━━━━━━
-${hoaPresent ? `• CC&Rs, Bylaws, HOA Budget, Meeting Minutes
-  - Verify each is present
-  ${community55plus ? '• Age Verification document required for 55+ community — verify present' : ''}` : 'N/A — No HOA indicated'}
+For each inventory-only document:
+  • Confirm it is present based on the filename listed
+  • Note in inventoryConfirmed array — do NOT flag as missing
+  • Do NOT attempt compliance analysis on these files
 
 ═══════════════════════════════════════════════════════
-CROSS-REFERENCE CHECKS (read multiple documents together)
+COMPLIANCE CHECKLIST — WHAT TO VERIFY IN READ DOCUMENTS
 ═══════════════════════════════════════════════════════
-1. Commission %: Does the Commission Demand Letter percentage match what is in the RPA?
-2. Party names: Are buyer and seller names spelled consistently across RPA, TDS, AVID, and Commission Demand?
-3. Property address: Is the address consistent across all documents?
-4. Pest clearance logic: Did the pest report find Section 1 items? Was pest work in any RFR? Is clearance cert present if required?
-5. Repair amounts: Do any RFR repair credits/amounts appear consistent across the RFR, RRRR, and RPA addendums?
+
+━━━ CONTRACTS (E1 or wherever filed) ━━━━━━━━━━━━━━━━━
+• RPA — buyer/seller names, property address, purchase price, COE date, executed
+• ${isBuyer ? 'BRBC' : 'Listing Agreement'} — client name matches RPA, commission terms, executed
+• Agency Disclosure — present and executed by all parties
+• Contingency Removal (CR) — contingencies listed, executed
+• Request for Repair (RFR) — repair items, dollar amounts, executed
+  CRITICAL: Note if pest clearance or pest work is included in any RFR
+• Seller Response to RFR (RRRR) — matches RFR items, executed
+• Extension of Time (ETA) — new dates, executed
+
+━━━ DISCLOSURES (E2 or wherever filed) ━━━━━━━━━━━━━━━
+• TDS — seller names match RPA, all sections complete, agent section complete, executed
+• SPQ — seller names, executed
+• AVID — agent name, property address, inspection items, executed
+• NHD — property address matches, executed
+• SBSA — executed
+• BIA — executed
+${isPreX1978 ? `• ⚠️ LPD REQUIRED (pre-1978) — seller acknowledgment, buyer acknowledgment, executed` : ''}
+${dualAgency ? `• ⚠️ PRBS REQUIRED (dual agency) — executed by all parties` : ''}
+
+━━━ TITLE & ESCROW (E4 or wherever filed) ━━━━━━━━━━━━━
+• Commission Demand Letter — SZ Real Estate Group branded "Official Commission Demand Letter"
+  May be filed as CD-[address], Commission Demand, or similar
+  Verify: commission % matches RPA, broker John P. Klein / SZ Real Estate Group, Authentisign ID present
+• EMD confirmation — amount matches RPA, deposit confirmed
+• Home Warranty Order — present, property address visible
+
+━━━ CROSS-REFERENCE CHECKS ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Commission %: Demand Letter % matches RPA?
+2. Party names: Consistent spelling across RPA, TDS, AVID, Commission Demand?
+3. Property address: Consistent across all documents?
+4. Pest clearance: Did any RFR include pest work? If yes, note clearance cert needed.
+5. Repair amounts: RFR amounts consistent with RRRR response?
 
 ═══════════════════════════════════════════════════════
 RATING DEFINITIONS
 ═══════════════════════════════════════════════════════
-🔴 TRUE RISK — Required document is missing entirely, OR document is present but unexecuted (blank signature lines with no names), OR a cross-reference check reveals a material discrepancy (e.g. commission % mismatch). Requires action before COE.
-
-🟡 MANAGEABLE — Document is present but has a minor issue: a page may be missing initials, a date field appears blank, or agent should verify a specific detail. Also flag if a document could only be confirmed by filename (not content) due to download failure.
-
-✅ CLEAR — Document confirmed present and appears properly executed. Cite your specific evidence: party names found, Authentisign ID if present, page reference if helpful.
+🔴 TRUE RISK — Document missing entirely, OR present but unexecuted, OR material cross-reference discrepancy. Action required before COE.
+🟡 MANAGEABLE — Present but minor issue: blank date field, missing initials, agent should verify a specific detail.
+✅ CLEAR — Confirmed present and properly executed. Cite evidence: party names, Authentisign ID, key data.
+📋 INVENTORY CONFIRMED — Present by filename. Not read. No compliance determination made.
 
 ═══════════════════════════════════════════════════════
-OUTPUT FORMAT
+OUTPUT — RETURN ONLY THIS JSON, NO OTHER TEXT
 ═══════════════════════════════════════════════════════
-Return ONLY this JSON structure. No preamble, no markdown, no backticks.
-
 {
-  "summary": "3-4 sentence overall compliance assessment. Be specific — mention what was verified, what was found, and any material issues.",
+  "summary": "3-4 sentence overall assessment. Specify what was read vs inventoried. Call out any material findings.",
   "overallRisk": "HIGH | MEDIUM | LOW",
   "trueRisk": [
-    {
-      "item": "document or issue name",
-      "detail": "specific finding with evidence from the document",
-      "evidence": "quote or cite the specific text, ID, or data point that supports this finding",
-      "folder": "E1/E2/E3/E4/E5"
-    }
+    { "item": "name", "detail": "specific finding", "evidence": "exact text/ID cited from document", "folder": "E1/E2/E3/E4/E5" }
   ],
   "manageable": [
-    {
-      "item": "document or issue name",
-      "detail": "specific finding and recommended action",
-      "evidence": "what you found or did not find",
-      "folder": "E1/E2/E3/E4/E5"
-    }
+    { "item": "name", "detail": "finding and recommended action", "evidence": "what was found", "folder": "E1/E2/E3/E4/E5" }
   ],
   "clear": [
-    {
-      "item": "document name",
-      "detail": "confirmed present and executed",
-      "evidence": "specific confirmation: party names, Authentisign ID, key data verified",
-      "folder": "E1/E2/E3/E4/E5"
-    }
+    { "item": "name", "detail": "confirmed present and executed", "evidence": "party names, Authentisign ID, key data verified", "folder": "E1/E2/E3/E4/E5" }
+  ],
+  "inventoryConfirmed": [
+    { "item": "filename", "detail": "Present by filename — not read", "folder": "E1/E2/E3/E4/E5" }
   ],
   "crossReferenceFindings": [
-    {
-      "check": "description of cross-reference performed",
-      "result": "PASS | FAIL | UNABLE TO VERIFY",
-      "detail": "specific finding"
-    }
+    { "check": "check description", "result": "PASS | FAIL | UNABLE TO VERIFY", "detail": "specific finding" }
   ],
-  "disclaimer": "This report reflects AI analysis of actual document content from Google Drive. It confirms document presence and visible execution indicators but does not constitute legal review. Agent verification of each document is required before COE. SZ Real Estate Group."
+  "disclaimer": "This report reflects AI analysis of actual document content (read files) and filename confirmation (inventory files). It does not constitute legal review. Agent verification required before COE. SZ Real Estate Group."
 }`;
 }
 
-// ─── Format report as readable text for email / Google Doc ───────────────────
+// ─── Format report as plain text for email / Google Doc ───────────────────────
 
-function formatReportAsText(folderName, report, submittedBy, auditDate, conditions) {
-  const riskEmoji = { HIGH: '🔴', MEDIUM: '🟡', LOW: '✅' };
-  const riskLabel = { HIGH: 'HIGH RISK — Action Required Before COE', MEDIUM: 'MEDIUM RISK — Review Items Below', LOW: 'LOW RISK — File Appears Complete' };
-
+function formatReport(folderName, report, submittedBy, auditDate, conditions, readCount, inventoryCount) {
+  const riskEmoji  = { HIGH: '🔴', MEDIUM: '🟡', LOW: '✅' };
+  const riskLabel  = { HIGH: 'HIGH RISK — Action Required Before COE', MEDIUM: 'MEDIUM RISK — Review Items Below', LOW: 'LOW RISK — File Appears Complete' };
   const lines = [];
 
   lines.push('═══════════════════════════════════════════════════════');
   lines.push('SZREG AI COMPLIANCE AUDIT REPORT');
   lines.push('═══════════════════════════════════════════════════════');
-  lines.push(`Transaction: ${folderName}`);
-  lines.push(`Audited by: ${submittedBy}`);
-  lines.push(`Date: ${auditDate}`);
-  lines.push(`Type: ${conditions.transactionType}`);
+  lines.push(`Transaction:  ${folderName}`);
+  lines.push(`Audited by:   ${submittedBy}`);
+  lines.push(`Date:         ${auditDate}`);
+  lines.push(`Type:         ${conditions.transactionType}`);
+  lines.push(`Documents:    ${readCount} fully read | ${inventoryCount} inventory confirmed`);
   lines.push('');
   lines.push(`${riskEmoji[report.overallRisk] || '🟡'} ${riskLabel[report.overallRisk] || report.overallRisk}`);
   lines.push('');
@@ -778,45 +601,54 @@ function formatReportAsText(folderName, report, submittedBy, auditDate, conditio
   lines.push(report.summary);
   lines.push('');
 
-  if (report.trueRisk && report.trueRisk.length > 0) {
+  if (report.trueRisk?.length) {
     lines.push('🔴 TRUE RISK — ACTION REQUIRED BEFORE COE');
     lines.push('───────────────────────────────────────────────────────');
-    for (const item of report.trueRisk) {
-      lines.push(`• ${item.item} [${item.folder}]`);
-      lines.push(`  Finding: ${item.detail}`);
-      if (item.evidence) lines.push(`  Evidence: ${item.evidence}`);
+    for (const i of report.trueRisk) {
+      lines.push(`• ${i.item} [${i.folder}]`);
+      lines.push(`  Finding:  ${i.detail}`);
+      if (i.evidence) lines.push(`  Evidence: ${i.evidence}`);
       lines.push('');
     }
   }
 
-  if (report.manageable && report.manageable.length > 0) {
+  if (report.manageable?.length) {
     lines.push('🟡 MANAGEABLE — VERIFY BEFORE COE');
     lines.push('───────────────────────────────────────────────────────');
-    for (const item of report.manageable) {
-      lines.push(`• ${item.item} [${item.folder}]`);
-      lines.push(`  Finding: ${item.detail}`);
-      if (item.evidence) lines.push(`  Evidence: ${item.evidence}`);
+    for (const i of report.manageable) {
+      lines.push(`• ${i.item} [${i.folder}]`);
+      lines.push(`  Finding:  ${i.detail}`);
+      if (i.evidence) lines.push(`  Evidence: ${i.evidence}`);
       lines.push('');
     }
   }
 
-  if (report.clear && report.clear.length > 0) {
-    lines.push('✅ CLEAR — CONFIRMED PRESENT');
+  if (report.clear?.length) {
+    lines.push('✅ CLEAR — CONFIRMED PRESENT & EXECUTED');
     lines.push('───────────────────────────────────────────────────────');
-    for (const item of report.clear) {
-      lines.push(`• ${item.item} [${item.folder}]`);
-      if (item.evidence) lines.push(`  Evidence: ${item.evidence}`);
+    for (const i of report.clear) {
+      lines.push(`• ${i.item} [${i.folder}]`);
+      if (i.evidence) lines.push(`  Evidence: ${i.evidence}`);
       lines.push('');
     }
   }
 
-  if (report.crossReferenceFindings && report.crossReferenceFindings.length > 0) {
+  if (report.inventoryConfirmed?.length) {
+    lines.push('📋 INVENTORY CONFIRMED — PRESENT (NOT READ)');
+    lines.push('───────────────────────────────────────────────────────');
+    for (const i of report.inventoryConfirmed) {
+      lines.push(`• ${i.item} [${i.folder}]`);
+    }
+    lines.push('');
+  }
+
+  if (report.crossReferenceFindings?.length) {
     lines.push('🔍 CROSS-REFERENCE CHECKS');
     lines.push('───────────────────────────────────────────────────────');
-    for (const check of report.crossReferenceFindings) {
-      const icon = check.result === 'PASS' ? '✅' : check.result === 'FAIL' ? '🔴' : '🟡';
-      lines.push(`${icon} ${check.check}: ${check.result}`);
-      if (check.detail) lines.push(`   ${check.detail}`);
+    for (const c of report.crossReferenceFindings) {
+      const icon = c.result === 'PASS' ? '✅' : c.result === 'FAIL' ? '🔴' : '🟡';
+      lines.push(`${icon} ${c.check}: ${c.result}`);
+      if (c.detail) lines.push(`   ${c.detail}`);
       lines.push('');
     }
   }
