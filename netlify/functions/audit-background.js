@@ -413,45 +413,49 @@ async function callOpenAI(folderName, conditions, readFiles, inventoryFiles, sub
   }
   console.log(`[OPENAI] Processing ${batches.length} batch(es) of up to ${MAX_ATTACHMENTS} files each`);
 
-  // ── Step 3: Create one Assistant (reused across batches) ─────────────
-  const assistantId = await createAssistant(apiKey);
-  console.log(`[OPENAI] Assistant: ${assistantId}`);
-
-  // ── Step 4: Run each batch, collect results ───────────────────────────
+  // ── Step 3: Run each batch with its own Assistant + vector store ────────
   const batchResults = [];
+  const assistantIds = []; // track for cleanup
+
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b];
     const batchLabel = `Batch ${b + 1} of ${batches.length}`;
     console.log(`[OPENAI] ${batchLabel}: ${batch.length} files`);
 
+    const batchFileIds = batch.map(f => f.fileId);
     const batchDocs = batch.map(f => f.doc);
     const batchPrompt = buildPrompt(folderName, conditions, submittedBy, batchDocs, b === 0 ? inventoryFiles : [], b, batches.length);
 
-    const threadId = await createThread(apiKey);
-    const attachments = batch.map(({ fileId }) => ({
-    file_id: fileId,
-    tools: [{ type: 'file_search' }]
-  }));
-
-    await addMessageToThread(threadId, batchPrompt, attachments, apiKey);
-    const runId = await runAssistant(assistantId, threadId, apiKey);
-    const runResult = await pollForCompletion(threadId, runId, apiKey);
-
-    if (runResult.status !== 'completed') {
-      console.error(`[OPENAI] ${batchLabel} failed: ${runResult.status}`);
-      batchResults.push(errorReport(`${batchLabel} did not complete: ${runResult.status}`));
-      continue;
-    }
-
-    const responseText = await getThreadResponse(threadId, apiKey);
-    console.log(`[OPENAI] ${batchLabel} response length: ${responseText.length}`);
-
     try {
+      // Create vector store for this batch's files
+      const vectorStoreId = await createVectorStore(batchFileIds, apiKey);
+      console.log(`[OPENAI] ${batchLabel} vector store: ${vectorStoreId}`);
+
+      // Create fresh Assistant with this vector store attached
+      const assistantId = await createAssistantWithVectorStore(vectorStoreId, apiKey);
+      assistantIds.push({ assistantId, vectorStoreId });
+      console.log(`[OPENAI] ${batchLabel} assistant: ${assistantId}`);
+
+      // Create thread and run
+      const threadId = await createThread(apiKey);
+      await addMessageToThread(threadId, batchPrompt, [], apiKey);
+      const runId = await runAssistant(assistantId, threadId, apiKey);
+      const runResult = await pollForCompletion(threadId, runId, apiKey);
+
+      if (runResult.status !== 'completed') {
+        console.error(`[OPENAI] ${batchLabel} failed: ${runResult.status}`, JSON.stringify(runResult.last_error || ''));
+        batchResults.push(errorReport(`${batchLabel} did not complete: ${runResult.status}`));
+        continue;
+      }
+
+      const responseText = await getThreadResponse(threadId, apiKey);
+      console.log(`[OPENAI] ${batchLabel} response length: ${responseText.length}`);
+
       const clean = responseText
         .replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
       const jsonStart = clean.indexOf('{');
       const jsonEnd = clean.lastIndexOf('}');
-      if (jsonStart === -1 || jsonEnd === -1) throw new Error('No JSON found');
+      if (jsonStart === -1 || jsonEnd === -1) throw new Error('No JSON found in response');
       const result = JSON.parse(clean.substring(jsonStart, jsonEnd + 1));
       result.trueRisk               = result.trueRisk               || [];
       result.manageable             = result.manageable             || [];
@@ -462,9 +466,10 @@ async function callOpenAI(folderName, conditions, readFiles, inventoryFiles, sub
       result.summary                = result.summary                || '';
       result.overallRisk            = result.overallRisk            || 'LOW';
       batchResults.push(result);
+
     } catch (e) {
-      console.error(`[OPENAI] ${batchLabel} parse error:`, e.message);
-      batchResults.push(errorReport('Parse error in ' + batchLabel + ': ' + e.message));
+      console.error(`[OPENAI] ${batchLabel} error:`, e.message);
+      batchResults.push(errorReport(`${batchLabel} error: ${e.message}`));
     }
   }
 
@@ -472,7 +477,10 @@ async function callOpenAI(folderName, conditions, readFiles, inventoryFiles, sub
   for (const { fileId } of fileIds) {
     try { await deleteFile(fileId, apiKey); } catch (e) { /* non-fatal */ }
   }
-  try { await deleteAssistant(assistantId, apiKey); } catch (e) { /* non-fatal */ }
+  for (const { assistantId, vectorStoreId } of assistantIds) {
+    try { await deleteAssistant(assistantId, apiKey); } catch (e) { /* non-fatal */ }
+    try { await deleteVectorStore(vectorStoreId, apiKey); } catch (e) { /* non-fatal */ }
+  }
 
   // ── Step 6: Merge batch results ───────────────────────────────────────
   return mergeBatchResults(batchResults);
@@ -623,6 +631,64 @@ function createAssistant(apiKey) {
   }, apiKey).then(data => {
     if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
     return data.id;
+  });
+}
+
+async function createVectorStore(fileIds, apiKey) {
+  // Create vector store
+  const store = await openAIPost('/v1/vector_stores', {
+    name: 'SZREG Audit Batch ' + Date.now()
+  }, apiKey);
+  if (store.error) throw new Error('Vector store create: ' + (store.error.message || JSON.stringify(store.error)));
+  const storeId = store.id;
+
+  // Add files to vector store
+  for (const fileId of fileIds) {
+    const res = await openAIPost(`/v1/vector_stores/${storeId}/files`, { file_id: fileId }, apiKey);
+    if (res.error) console.error(`[OPENAI] Vector store file add error for ${fileId}:`, res.error.message);
+  }
+
+  // Poll until vector store is ready (files processed)
+  let attempts = 0;
+  while (attempts < 30) {
+    await new Promise(r => setTimeout(r, 2000));
+    const status = await openAIGet(`/v1/vector_stores/${storeId}`, apiKey);
+    console.log(`[OPENAI] Vector store status: ${status.status} (${status.file_counts?.completed || 0}/${fileIds.length} files)`);
+    if (status.status === 'completed') break;
+    if (status.status === 'expired' || status.status === 'failed') {
+      throw new Error('Vector store failed: ' + status.status);
+    }
+    attempts++;
+  }
+
+  return storeId;
+}
+
+function createAssistantWithVectorStore(vectorStoreId, apiKey) {
+  return openAIPost('/v1/assistants', {
+    model: 'gpt-4o',
+    name: 'SZREG Compliance Auditor',
+    instructions: 'You are the SZREG AI Compliance Auditor for SZ Real Estate Group. You read actual transaction documents and perform rigorous compliance review. You never guess or infer — you only report what you can directly verify from document content. Always respond with valid JSON only. No preamble, no markdown, no explanation outside the JSON structure.',
+    tools: [{ type: 'file_search' }],
+    tool_resources: {
+      file_search: { vector_store_ids: [vectorStoreId] }
+    }
+  }, apiKey).then(data => {
+    if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+    return data.id;
+  });
+}
+
+function deleteVectorStore(vectorStoreId, apiKey) {
+  return new Promise((resolve) => {
+    const req = https.request({
+      hostname: 'api.openai.com',
+      path: `/v1/vector_stores/${vectorStoreId}`,
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'OpenAI-Beta': 'assistants=v2' }
+    }, res => { res.resume(); res.on('end', resolve); });
+    req.on('error', resolve);
+    req.end();
   });
 }
 
