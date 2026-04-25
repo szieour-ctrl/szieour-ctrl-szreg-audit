@@ -427,13 +427,11 @@ async function callOpenAI(folderName, conditions, readFiles, inventoryFiles, sub
     const batchPrompt = buildPrompt(folderName, conditions, submittedBy, batchDocs, b === 0 ? inventoryFiles : [], b, batches.length);
 
     const threadId = await createThread(apiKey);
-    const attachments = batch.map(({ fileId }) => ({
-      file_id: fileId,
-      tools: [{ type: 'file_search' }]
-    }));
+    // code_interpreter files go in tool_resources, not attachments
+  const fileIdList = batch.map(f => f.fileId);
 
-    await addMessageToThread(threadId, batchPrompt, attachments, apiKey);
-    const runId = await runAssistant(assistantId, threadId, apiKey);
+    await addMessageToThread(threadId, batchPrompt, [], apiKey);
+    const runId = await runAssistant(assistantId, threadId, apiKey, fileIdList);
     const runResult = await pollForCompletion(threadId, runId, apiKey);
 
     if (runResult.status !== 'completed') {
@@ -607,7 +605,7 @@ function createAssistant(apiKey) {
     model: 'gpt-4o',
     name: 'SZREG Compliance Auditor',
     instructions: 'You are the SZREG AI Compliance Auditor for SZ Real Estate Group. You read actual transaction documents and perform rigorous compliance review. You never guess or infer — you only report what you can directly verify from document content. Always respond with valid JSON only. No preamble, no markdown, no explanation outside the JSON structure.',
-    tools: [{ type: 'file_search' }]
+    tools: [{ type: 'code_interpreter' }]
   }, apiKey).then(data => {
     if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
     return data.id;
@@ -632,11 +630,18 @@ function addMessageToThread(threadId, prompt, attachments, apiKey) {
   });
 }
 
-function runAssistant(assistantId, threadId, apiKey) {
-  return openAIPost(`/v1/threads/${threadId}/runs`, {
+function runAssistant(assistantId, threadId, apiKey, fileIds = []) {
+  const body = {
     assistant_id: assistantId,
     max_completion_tokens: 8000
-  }, apiKey).then(data => {
+  };
+  // Attach files via tool_resources for code_interpreter
+  if (fileIds.length > 0) {
+    body.tool_resources = {
+      code_interpreter: { file_ids: fileIds }
+    };
+  }
+  return openAIPost(`/v1/threads/${threadId}/runs`, body, apiKey).then(data => {
     if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
     return data.id;
   });
