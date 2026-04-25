@@ -376,10 +376,10 @@ exports.handler = async (event) => {
 // ─── OpenAI Assistants API call ──────────────────────────────────────────────
 
 async function callOpenAI(folderName, conditions, readFiles, inventoryFiles, submittedBy) {
-  const prompt = buildPrompt(folderName, conditions, submittedBy, readFiles, inventoryFiles);
   const apiKey = process.env.OPENAI_API_KEY;
+  const MAX_ATTACHMENTS = 10; // OpenAI Assistants API limit per message
 
-  // ── Step 1: Upload each PDF to OpenAI Files API ─────────────────────────
+  // ── Step 1: Upload all PDFs to OpenAI Files API ──────────────────────
   const fileIds = [];
   for (const doc of readFiles) {
     try {
@@ -388,75 +388,119 @@ async function callOpenAI(folderName, conditions, readFiles, inventoryFiles, sub
       console.log(`[OPENAI] Uploaded: ${doc.filename} → ${fileId}`);
     } catch (err) {
       console.error(`[OPENAI] Upload failed for ${doc.filename}:`, err.message);
-      // Demote to inventory if upload fails
-      doc.uploadFailed = true;
-      inventoryFiles.push({ ...doc, skipReason: 'Upload to OpenAI failed: ' + err.message });
+      inventoryFiles.push({ ...doc, skipReason: 'Upload failed: ' + err.message });
     }
   }
-  console.log(`[OPENAI] ${fileIds.length} files uploaded successfully`);
+  console.log(`[OPENAI] ${fileIds.length} files uploaded`);
 
-  // ── Step 2: Create Assistant ────────────────────────────────────────────
+  // ── Step 2: Batch into chunks of 10 ──────────────────────────────────
+  const batches = [];
+  for (let i = 0; i < fileIds.length; i += MAX_ATTACHMENTS) {
+    batches.push(fileIds.slice(i, i + MAX_ATTACHMENTS));
+  }
+  console.log(`[OPENAI] Processing ${batches.length} batch(es) of up to ${MAX_ATTACHMENTS} files each`);
+
+  // ── Step 3: Create one Assistant (reused across batches) ─────────────
   const assistantId = await createAssistant(apiKey);
-  console.log(`[OPENAI] Assistant created: ${assistantId}`);
+  console.log(`[OPENAI] Assistant: ${assistantId}`);
 
-  // ── Step 3: Create Thread ───────────────────────────────────────────────
-  const threadId = await createThread(apiKey);
-  console.log(`[OPENAI] Thread created: ${threadId}`);
+  // ── Step 4: Run each batch, collect results ───────────────────────────
+  const batchResults = [];
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b];
+    const batchLabel = `Batch ${b + 1} of ${batches.length}`;
+    console.log(`[OPENAI] ${batchLabel}: ${batch.length} files`);
 
-  // ── Step 4: Add message with all files attached ─────────────────────────
-  const attachments = fileIds.map(({ fileId }) => ({
-    file_id: fileId,
-    tools: [{ type: 'file_search' }]
-  }));
+    const batchDocs = batch.map(f => f.doc);
+    const batchPrompt = buildPrompt(folderName, conditions, submittedBy, batchDocs, b === 0 ? inventoryFiles : []);
 
-  await addMessageToThread(threadId, prompt, attachments, apiKey);
-  console.log(`[OPENAI] Message added with ${attachments.length} attachments`);
+    const threadId = await createThread(apiKey);
+    const attachments = batch.map(({ fileId }) => ({
+      file_id: fileId,
+      tools: [{ type: 'file_search' }]
+    }));
 
-  // ── Step 5: Run the Assistant ───────────────────────────────────────────
-  const runId = await runAssistant(assistantId, threadId, apiKey);
-  console.log(`[OPENAI] Run started: ${runId}`);
+    await addMessageToThread(threadId, batchPrompt, attachments, apiKey);
+    const runId = await runAssistant(assistantId, threadId, apiKey);
+    const runResult = await pollForCompletion(threadId, runId, apiKey);
 
-  // ── Step 6: Poll for completion ─────────────────────────────────────────
-  const runResult = await pollForCompletion(threadId, runId, apiKey);
-  console.log(`[OPENAI] Run status: ${runResult.status}`);
+    if (runResult.status !== 'completed') {
+      console.error(`[OPENAI] ${batchLabel} failed: ${runResult.status}`);
+      batchResults.push(errorReport(`${batchLabel} did not complete: ${runResult.status}`));
+      continue;
+    }
 
-  if (runResult.status !== 'completed') {
-    return errorReport(`Assistant run did not complete. Status: ${runResult.status}`);
+    const responseText = await getThreadResponse(threadId, apiKey);
+    console.log(`[OPENAI] ${batchLabel} response length: ${responseText.length}`);
+
+    try {
+      const clean = responseText
+        .replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+      const jsonStart = clean.indexOf('{');
+      const jsonEnd = clean.lastIndexOf('}');
+      if (jsonStart === -1 || jsonEnd === -1) throw new Error('No JSON found');
+      const result = JSON.parse(clean.substring(jsonStart, jsonEnd + 1));
+      batchResults.push(result);
+    } catch (e) {
+      console.error(`[OPENAI] ${batchLabel} parse error:`, e.message);
+      batchResults.push(errorReport('Parse error in ' + batchLabel + ': ' + e.message));
+    }
   }
 
-  // ── Step 7: Get response ────────────────────────────────────────────────
-  const responseText = await getThreadResponse(threadId, apiKey);
-  console.log('[OPENAI] Response length:', responseText.length);
-  console.log('[OPENAI] Response preview:', responseText.substring(0, 300));
-
-  // ── Step 8: Cleanup — delete uploaded files ─────────────────────────────
+  // ── Step 5: Cleanup ───────────────────────────────────────────────────
   for (const { fileId } of fileIds) {
     try { await deleteFile(fileId, apiKey); } catch (e) { /* non-fatal */ }
   }
   try { await deleteAssistant(assistantId, apiKey); } catch (e) { /* non-fatal */ }
 
-  // ── Step 9: Parse response ──────────────────────────────────────────────
-  try {
-    const clean = responseText
-      .replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-    const jsonStart = clean.indexOf('{');
-    const jsonEnd = clean.lastIndexOf('}');
-    if (jsonStart === -1 || jsonEnd === -1) throw new Error('No JSON in response');
-    const result = JSON.parse(clean.substring(jsonStart, jsonEnd + 1));
-    result.trueRisk               = result.trueRisk               || [];
-    result.manageable             = result.manageable             || [];
-    result.clear                  = result.clear                  || [];
-    result.inventoryConfirmed     = result.inventoryConfirmed     || [];
-    result.crossReferenceFindings = result.crossReferenceFindings || [];
-    result.summary                = result.summary                || 'Audit complete.';
-    result.overallRisk            = result.overallRisk            || 'LOW';
-    result.disclaimer             = result.disclaimer             || 'Agent review required before COE.';
-    return result;
-  } catch (e) {
-    console.error('[OPENAI] Parse error:', e.message);
-    console.error('[OPENAI] Raw response:', responseText.substring(0, 1000));
-    return errorReport('Response parse error: ' + e.message + ' | Raw: ' + responseText.substring(0, 200));
+  // ── Step 6: Merge batch results ───────────────────────────────────────
+  return mergeBatchResults(batchResults);
+}
+
+function mergeBatchResults(results) {
+  if (!results.length) return errorReport('No batch results returned');
+  if (results.length === 1) {
+    const r = results[0];
+    r.trueRisk               = r.trueRisk               || [];
+    r.manageable             = r.manageable             || [];
+    r.clear                  = r.clear                  || [];
+    r.inventoryConfirmed     = r.inventoryConfirmed     || [];
+    r.crossReferenceFindings = r.crossReferenceFindings || [];
+    r.summary                = r.summary                || 'Audit complete.';
+    r.overallRisk            = r.overallRisk            || 'LOW';
+    r.disclaimer             = r.disclaimer             || 'Agent review required before COE.';
+    return r;
   }
+
+  const merged = {
+    trueRisk: [],
+    manageable: [],
+    clear: [],
+    inventoryConfirmed: [],
+    crossReferenceFindings: [],
+    summaries: [],
+    disclaimer: 'This report reflects AI analysis of actual document content (read files) and filename confirmation (inventory files). It does not constitute legal review. Agent verification required before COE. SZ Real Estate Group.'
+  };
+
+  for (const r of results) {
+    if (r.trueRisk)               merged.trueRisk.push(...r.trueRisk);
+    if (r.manageable)             merged.manageable.push(...r.manageable);
+    if (r.clear)                  merged.clear.push(...r.clear);
+    if (r.inventoryConfirmed)     merged.inventoryConfirmed.push(...r.inventoryConfirmed);
+    if (r.crossReferenceFindings) merged.crossReferenceFindings.push(...r.crossReferenceFindings);
+    if (r.summary)                merged.summaries.push(r.summary);
+  }
+
+  // Overall risk — take highest across batches
+  const riskOrder = { HIGH: 3, MEDIUM: 2, LOW: 1 };
+  const highestRisk = results.reduce((max, r) => {
+    return (riskOrder[r.overallRisk] || 0) > (riskOrder[max] || 0) ? r.overallRisk : max;
+  }, 'LOW');
+
+  merged.overallRisk = highestRisk;
+  merged.summary = merged.summaries.join(' | ');
+
+  return merged;
 }
 
 // ─── OpenAI API helpers ───────────────────────────────────────────────────────
