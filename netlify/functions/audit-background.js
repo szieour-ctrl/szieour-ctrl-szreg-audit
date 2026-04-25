@@ -424,7 +424,7 @@ async function callOpenAI(folderName, conditions, readFiles, inventoryFiles, sub
     console.log(`[OPENAI] ${batchLabel}: ${batch.length} files`);
 
     const batchDocs = batch.map(f => f.doc);
-    const batchPrompt = buildPrompt(folderName, conditions, submittedBy, batchDocs, b === 0 ? inventoryFiles : []);
+    const batchPrompt = buildPrompt(folderName, conditions, submittedBy, batchDocs, b === 0 ? inventoryFiles : [], b, batches.length);
 
     const threadId = await createThread(apiKey);
     const attachments = batch.map(({ fileId }) => ({
@@ -510,7 +510,21 @@ function mergeBatchResults(results) {
   }, 'LOW');
 
   merged.overallRisk = highestRisk;
-  merged.summary = merged.summaries.join(' | ');
+  // Synthesize summaries into one coherent paragraph
+  if (merged.summaries.length === 1) {
+    merged.summary = merged.summaries[0];
+  } else {
+    // Build a concise merged summary from bullet points of each batch
+    const riskCounts = `${merged.trueRisk.length} True Risk, ${merged.manageable.length} Manageable, ${merged.clear.length} Clear`;
+    const trueRiskItems = merged.trueRisk.length > 0
+      ? merged.trueRisk.map(r => r.item).join(', ')
+      : 'none';
+    const batchSummaryText = merged.summaries.map((s, i) => `Batch ${i+1}: ${s}`).join(' ');
+    merged.summary = `Compliance audit completed for ${merged.summaries.length} document batches. ` +
+      `Results: ${riskCounts}. ` +
+      (merged.trueRisk.length > 0 ? `True Risk items requiring action: ${trueRiskItems}. ` : 'No True Risk items identified. ') +
+      `All inventory-only documents confirmed present by filename. Agent verification required before COE.`;
+  }
 
   // Deduplicate cross-reference findings by check description
   const seenChecks = new Set();
@@ -751,7 +765,7 @@ function errorReport(detail) {
 
 // ─── Compliance prompt ────────────────────────────────────────────────────────
 
-function buildPrompt(folderName, conditions, submittedBy, readFiles, inventoryFiles) {
+function buildPrompt(folderName, conditions, submittedBy, readFiles, inventoryFiles, batchIndex = 0, totalBatches = 1) {
   const { transactionType, yearBuilt, isPreX1978, hoaPresent, poolPresent, dualAgency, community55plus } = conditions;
   const isBuyer = transactionType === 'BUYER';
 
@@ -772,11 +786,15 @@ HYBRID AUDIT — TWO MODES
 MODE 1 — FULL COMPLIANCE READ (documents attached below):
 ${readList || '  (none)'}
 
+CRITICAL SCOPE RULE: You may ONLY report findings on the documents attached in this batch.
+Do NOT reference, cite, or draw conclusions from documents not attached to this message.
+If a cross-reference requires a document not in this batch, mark it UNABLE TO VERIFY.
+
 For each attached document:
   • Read the actual content
   • Verify party names, dates, signatures, Authentisign/DocuSign IDs
-  • Cross-reference commission %, party name consistency, property address
-  • Report findings with specific evidence — never infer
+  • Report findings with specific evidence from THIS document only — never infer
+  • Only cite evidence from attached files — do not reference other batch documents
 
 MODE 2 — INVENTORY CONFIRM (not attached — filename only):
 ${inventoryList || '  (none)'}
@@ -818,11 +836,14 @@ ${dualAgency ? `• ⚠️ PRBS REQUIRED (dual agency) — executed by all parti
 • Home Warranty Order — present, property address visible
 
 ━━━ CROSS-REFERENCE CHECKS ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. Commission %: Demand Letter % matches RPA?
-2. Party names: Consistent spelling across RPA, TDS, AVID, Commission Demand?
-3. Property address: Consistent across all documents?
-4. Pest clearance: Did any RFR include pest work? If yes, note clearance cert needed.
-5. Repair amounts: RFR amounts consistent with RRRR response?
+IMPORTANT: Only perform cross-reference checks on documents YOU HAVE ATTACHED IN THIS BATCH.
+If a required document for a check is not in this batch, mark result as UNABLE TO VERIFY — do not guess.
+
+1. Commission %: Does Commission Demand % match the RPA purchase agreement?
+2. Party names: Consistent spelling across attached documents only?
+3. Property address: Consistent across attached documents only?
+4. Pest clearance: Did any attached RFR include pest work? Is clearance cert present?
+5. Repair amounts: Do RFR amounts match RRRR response in attached documents?
 
 ═══════════════════════════════════════════════════════
 RATING DEFINITIONS
