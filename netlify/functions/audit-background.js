@@ -452,6 +452,14 @@ async function callOpenAI(folderName, conditions, readFiles, inventoryFiles, sub
       const jsonEnd = clean.lastIndexOf('}');
       if (jsonStart === -1 || jsonEnd === -1) throw new Error('No JSON found');
       const result = JSON.parse(clean.substring(jsonStart, jsonEnd + 1));
+      result.trueRisk               = result.trueRisk               || [];
+      result.manageable             = result.manageable             || [];
+      result.humanCheck             = result.humanCheck             || [];
+      result.clear                  = result.clear                  || [];
+      result.inventoryConfirmed     = result.inventoryConfirmed     || [];
+      result.crossReferenceFindings = result.crossReferenceFindings || [];
+      result.summary                = result.summary                || '';
+      result.overallRisk            = result.overallRisk            || 'LOW';
       batchResults.push(result);
     } catch (e) {
       console.error(`[OPENAI] ${batchLabel} parse error:`, e.message);
@@ -475,6 +483,7 @@ function mergeBatchResults(results) {
     const r = results[0];
     r.trueRisk               = r.trueRisk               || [];
     r.manageable             = r.manageable             || [];
+    r.humanCheck             = r.humanCheck             || [];
     r.clear                  = r.clear                  || [];
     r.inventoryConfirmed     = r.inventoryConfirmed     || [];
     r.crossReferenceFindings = r.crossReferenceFindings || [];
@@ -487,6 +496,7 @@ function mergeBatchResults(results) {
   const merged = {
     trueRisk: [],
     manageable: [],
+    humanCheck: [],
     clear: [],
     inventoryConfirmed: [],
     crossReferenceFindings: [],
@@ -497,6 +507,7 @@ function mergeBatchResults(results) {
   for (const r of results) {
     if (r.trueRisk)               merged.trueRisk.push(...r.trueRisk);
     if (r.manageable)             merged.manageable.push(...r.manageable);
+    if (r.humanCheck)             merged.humanCheck.push(...r.humanCheck);
     if (r.clear)                  merged.clear.push(...r.clear);
     if (r.inventoryConfirmed)     merged.inventoryConfirmed.push(...r.inventoryConfirmed);
     if (r.crossReferenceFindings) merged.crossReferenceFindings.push(...r.crossReferenceFindings);
@@ -515,7 +526,7 @@ function mergeBatchResults(results) {
     merged.summary = merged.summaries[0];
   } else {
     // Build a concise merged summary from bullet points of each batch
-    const riskCounts = `${merged.trueRisk.length} True Risk, ${merged.manageable.length} Manageable, ${merged.clear.length} Clear`;
+    const riskCounts = `${merged.trueRisk.length} True Risk, ${merged.manageable.length} Manageable, ${merged.humanCheck.length} Human Check, ${merged.clear.length} Clear`;
     const trueRiskItems = merged.trueRisk.length > 0
       ? merged.trueRisk.map(r => r.item).join(', ')
       : 'none';
@@ -797,6 +808,16 @@ each document fully before reporting. Do not report "unable to read" unless the 
 is genuinely blank after searching. For each document, explicitly call file_search
 to retrieve its content before making any compliance determination.
 
+CRITICAL FILING RULE — STANDALONE FILES SATISFY REQUIREMENTS:
+Many disclosure documents are filed as standalone PDFs rather than embedded in the RPA or contract.
+A standalone file satisfies its compliance requirement. Specific examples:
+  • A standalone LPD.pdf satisfies the Lead-Based Paint Disclosure requirement
+  • A standalone TDS.pdf satisfies the Transfer Disclosure Statement requirement
+  • A standalone SPQ.pdf satisfies the Seller Property Questionnaire requirement
+  • A standalone AVID.pdf satisfies the Agent Visual Inspection Disclosure requirement
+  • A standalone NHD file satisfies the Natural Hazard Disclosure requirement
+Do NOT flag a disclosure as missing if a standalone file for that disclosure exists in this batch.
+
 For each attached document:
   • Use file_search to retrieve the full document content
   • Verify party names, dates, signatures, Authentisign/DocuSign IDs
@@ -833,7 +854,11 @@ COMPLIANCE CHECKLIST — WHAT TO VERIFY IN READ DOCUMENTS
 • NHD — property address matches, executed
 • SBSA — executed
 • BIA — executed
-${isPreX1978 ? `• ⚠️ LPD REQUIRED (pre-1978) — seller acknowledgment, buyer acknowledgment, executed` : ''}
+${isPreX1978 ? `• ⚠️ LPD REQUIRED (pre-1978 property)
+  IMPORTANT: LPD may be filed as a STANDALONE FILE (e.g. 40th 3306 - LPD.pdf) OR embedded in the RPA.
+  If a standalone LPD file is present in the attached documents, that SATISFIES the LPD requirement.
+  Do NOT flag LPD as missing if a standalone LPD file was read in this batch.
+  Verify: seller acknowledgment present, buyer acknowledgment present, executed by all parties.` : ''}
 ${dualAgency ? `• ⚠️ PRBS REQUIRED (dual agency) — executed by all parties` : ''}
 
 ━━━ TITLE & ESCROW (E4 or wherever filed) ━━━━━━━━━━━━━
@@ -856,19 +881,46 @@ If a required document for a check is not in this batch, mark result as UNABLE T
 ═══════════════════════════════════════════════════════
 RATING DEFINITIONS
 ═══════════════════════════════════════════════════════
-🔴 TRUE RISK — Document missing entirely, OR present but unexecuted, OR material cross-reference discrepancy. Action required before COE.
-🟡 MANAGEABLE — Present but minor issue: blank date field, missing initials, agent should verify a specific detail.
-✅ CLEAR — Confirmed present and properly executed. Cite evidence: party names, Authentisign ID, key data.
+🔴 TRUE RISK — Document completely missing from folder, OR no Authentisign/DocuSign ID AND no signatures visible. Agent action required before COE.
+
+🟡 MANAGEABLE — Document present but substantive issue: unrecognized form, conflicting party names, date discrepancy, or content cannot be verified. Agent must review before COE.
+
+🔵 HUMAN CHECK — Authentisign ID confirmed (execution proven), BUT a specific page has a blank or incomplete signature/initial block. LOW risk. Agent visually verifies that page before COE. Use this whenever Authentisign ID is present but a page-level issue exists.
+
+✅ CLEAR — Authentisign ID confirmed — execution indicators present. No page-level issues detected.
+
 📋 INVENTORY CONFIRMED — Present by filename. Not read. No compliance determination made.
 
 ═══════════════════════════════════════════════════════
 OUTPUT — RETURN ONLY THIS JSON, NO OTHER TEXT
 ═══════════════════════════════════════════════════════
 
-MANDATORY RULE: Every single attached document in this batch MUST appear in either
-trueRisk, manageable, OR clear. No attached document may be omitted from the output.
-If a document appears executed with no issues, add it to clear with its Authentisign ID or key evidence.
+MANDATORY RULE: Every single attached document in this batch MUST appear in exactly one of:
+trueRisk, manageable, humanCheck, OR clear. No attached document may be omitted.
 Do not group multiple documents under one item — each document gets its own entry.
+
+EXECUTION VERIFICATION RULE — follow this decision tree for every document:
+1. Search for Authentisign ID or DocuSign Envelope ID in the document
+   → If found: document execution is confirmed. Proceed to step 2.
+   → If not found AND no wet signatures visible: flag as MANAGEABLE
+   → If not found AND document completely unreadable: flag as MANAGEABLE (not True Risk)
+
+2. With Authentisign ID confirmed — search every page for blank signature or initial blocks:
+   → If all signature/initial blocks appear completed: add to CLEAR
+      Evidence must include: Authentisign ID, party names found, any key dates
+   → If any page shows a blank or incomplete signature/initial block: add to HUMAN CHECK
+      Evidence must include: Authentisign ID confirmed, which page, what appears incomplete
+      Risk = LOW — Authentisign ID proves execution intent
+
+3. Document completely absent from the folder: TRUE RISK only
+
+PAGE-LEVEL SEARCH INSTRUCTION:
+For each document, use file_search to find:
+  - The Authentisign ID or DocuSign Envelope ID (usually on last page or header)
+  - Party names and property address
+  - Any signature blocks that appear blank (look for lines with no name above them)
+  - Any initial boxes that appear empty (look for □ or blank ___ near party name fields)
+Report the specific page number or section where any issue is found.
 
 {
   "summary": "2-3 sentence assessment of THIS batch only. Name specific documents reviewed. Call out any findings.",
@@ -880,7 +932,10 @@ Do not group multiple documents under one item — each document gets its own en
     { "item": "exact filename or document name", "detail": "finding and recommended action", "evidence": "specific text found", "folder": "E1/E2/E3/E4/E5" }
   ],
   "clear": [
-    { "item": "exact filename or document name", "detail": "confirmed present and executed", "evidence": "Authentisign ID, party names, execution date confirmed", "folder": "E1/E2/E3/E4/E5" }
+    { "item": "exact filename or document name", "detail": "Authentisign ID confirmed — execution indicators present", "evidence": "Authentisign ID: [ID], party names: [names], address verified", "folder": "E1/E2/E3/E4/E5" }
+  ],
+  "humanCheck": [
+    { "item": "exact filename or document name", "detail": "Authentisign ID confirmed but possible incomplete page — describe which page and what appears blank", "evidence": "Authentisign ID: [ID] confirmed. Page [N]: [signature/initial block] appears blank or incomplete.", "folder": "E1/E2/E3/E4/E5", "risk": "LOW" }
   ],
   "inventoryConfirmed": [
     { "item": "exact filename", "detail": "Present by filename — not read", "folder": "E1/E2/E3/E4/E5" }
@@ -947,6 +1002,20 @@ function formatReport(folderName, report, submittedBy, auditDate, conditions, re
     lines.push('🟡 MANAGEABLE — VERIFY BEFORE COE');
     lines.push('───────────────────────────────────────────────────────');
     for (const i of report.manageable) {
+      lines.push(`• ${i.item} [${i.folder}]`);
+      lines.push(`  Finding:  ${i.detail}`);
+      if (i.evidence) lines.push(`  Evidence: ${i.evidence}`);
+      lines.push('');
+    }
+  }
+
+  if (report.humanCheck?.length) {
+    lines.push('🔵 HUMAN CHECK — LOW RISK — VERIFY BEFORE COE');
+    lines.push('───────────────────────────────────────────────────────');
+    lines.push('Authentisign ID confirmed on these documents. AI flagged a possible');
+    lines.push('incomplete signature or initial block. Agent should visually verify.');
+    lines.push('');
+    for (const i of report.humanCheck) {
       lines.push(`• ${i.item} [${i.folder}]`);
       lines.push(`  Finding:  ${i.detail}`);
       if (i.evidence) lines.push(`  Evidence: ${i.evidence}`);
