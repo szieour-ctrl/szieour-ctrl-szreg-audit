@@ -427,11 +427,13 @@ async function callOpenAI(folderName, conditions, readFiles, inventoryFiles, sub
     const batchPrompt = buildPrompt(folderName, conditions, submittedBy, batchDocs, b === 0 ? inventoryFiles : [], b, batches.length);
 
     const threadId = await createThread(apiKey);
-    // code_interpreter files go in tool_resources, not attachments
-  const fileIdList = batch.map(f => f.fileId);
+    const attachments = batch.map(({ fileId }) => ({
+    file_id: fileId,
+    tools: [{ type: 'file_search' }]
+  }));
 
-    await addMessageToThread(threadId, batchPrompt, [], apiKey);
-    const runId = await runAssistant(assistantId, threadId, apiKey, fileIdList);
+    await addMessageToThread(threadId, batchPrompt, attachments, apiKey);
+    const runId = await runAssistant(assistantId, threadId, apiKey);
     const runResult = await pollForCompletion(threadId, runId, apiKey);
 
     if (runResult.status !== 'completed') {
@@ -605,7 +607,7 @@ function createAssistant(apiKey) {
     model: 'gpt-4o',
     name: 'SZREG Compliance Auditor',
     instructions: 'You are the SZREG AI Compliance Auditor for SZ Real Estate Group. You read actual transaction documents and perform rigorous compliance review. You never guess or infer — you only report what you can directly verify from document content. Always respond with valid JSON only. No preamble, no markdown, no explanation outside the JSON structure.',
-    tools: [{ type: 'code_interpreter' }]
+    tools: [{ type: 'file_search' }]
   }, apiKey).then(data => {
     if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
     return data.id;
@@ -630,18 +632,11 @@ function addMessageToThread(threadId, prompt, attachments, apiKey) {
   });
 }
 
-function runAssistant(assistantId, threadId, apiKey, fileIds = []) {
-  const body = {
+function runAssistant(assistantId, threadId, apiKey) {
+  return openAIPost(`/v1/threads/${threadId}/runs`, {
     assistant_id: assistantId,
     max_completion_tokens: 8000
-  };
-  // Attach files via tool_resources for code_interpreter
-  if (fileIds.length > 0) {
-    body.tool_resources = {
-      code_interpreter: { file_ids: fileIds }
-    };
-  }
-  return openAIPost(`/v1/threads/${threadId}/runs`, body, apiKey).then(data => {
+  }, apiKey).then(data => {
     if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
     return data.id;
   });
@@ -791,15 +786,23 @@ HYBRID AUDIT — TWO MODES
 MODE 1 — FULL COMPLIANCE READ (documents attached below):
 ${readList || '  (none)'}
 
-CRITICAL SCOPE RULE: You may ONLY report findings on the documents attached in this batch.
-Do NOT reference, cite, or draw conclusions from documents not attached to this message.
-If a cross-reference requires a document not in this batch, mark it UNABLE TO VERIFY.
+CRITICAL SCOPE RULE: You may ONLY report findings on the documents listed in this batch.
+Do NOT reference documents not in this batch. If a cross-reference requires a document
+not in this batch, mark it UNABLE TO VERIFY.
+
+IMPORTANT — HOW TO READ THESE DOCUMENTS:
+These documents are attached via file_search which gives you full access to all text,
+including text extracted from scanned pages via OCR. Use the file_search tool to read
+each document fully before reporting. Do not report "unable to read" unless the file
+is genuinely blank after searching. For each document, explicitly call file_search
+to retrieve its content before making any compliance determination.
 
 For each attached document:
-  • Read the actual content
+  • Use file_search to retrieve the full document content
   • Verify party names, dates, signatures, Authentisign/DocuSign IDs
-  • Report findings with specific evidence from THIS document only — never infer
-  • Only cite evidence from attached files — do not reference other batch documents
+  • Report findings with specific evidence — exact text, IDs, names found
+  • If a document appears blank after searching, flag as Manageable (not True Risk)
+  • Only cite evidence from files in this batch
 
 MODE 2 — INVENTORY CONFIRM (not attached — filename only):
 ${inventoryList || '  (none)'}
