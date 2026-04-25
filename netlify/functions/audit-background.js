@@ -280,8 +280,10 @@ exports.handler = async (event) => {
           type: isPDF ? 'pdf' : file.mimeType
         });
 
-        if (isPDF && fileSizeKB < 15000) {
-          // Download files under 15MB — skip enormous scanned packages
+        // Per-file cap: 8MB max per document (OpenAI handles larger payloads than Claude)
+        const PER_FILE_CAP_KB = 8192;
+
+        if (isPDF && fileSizeKB < PER_FILE_CAP_KB) {
           try {
             const base64Data = await downloadFileAsBase64(file.id, token);
             claudeDocuments.push({
@@ -293,7 +295,6 @@ exports.handler = async (event) => {
             console.log(`[AUDIT] Downloaded: ${file.name} (${Math.round(fileSizeKB)}KB)`);
           } catch (dlErr) {
             console.error(`[AUDIT] Failed to download ${file.name}:`, dlErr.message);
-            // Still note the file exists, just couldn't read it
             claudeDocuments.push({
               folder: sectionLabel,
               filename: file.name,
@@ -302,20 +303,34 @@ exports.handler = async (event) => {
               downloadError: dlErr.message
             });
           }
-        } else if (fileSizeKB >= 15000) {
-          // File too large to download — note it exists but flag for agent
+        } else if (isPDF) {
           claudeDocuments.push({
             folder: sectionLabel,
             filename: file.name,
             sizeKB: Math.round(fileSizeKB),
             base64: null,
-            downloadError: 'File exceeds 15MB — not downloaded, presence noted only'
+            downloadError: `File is ${Math.round(fileSizeKB)}KB — exceeds 2MB limit. Likely scanned. Presence confirmed by filename only.`
           });
+          console.log(`[AUDIT] Skipped (too large): ${file.name} (${Math.round(fileSizeKB)}KB)`);
         }
       }
     }
 
-    console.log(`[AUDIT] Total documents found: ${claudeDocuments.length}`);
+    // Total payload guard — drop largest files if cumulative base64 exceeds 12MB
+    const TOTAL_CAP_KB = 40960; // 40MB total — OpenAI handles this comfortably
+    let runningTotal = 0;
+    for (const doc of claudeDocuments) {
+      if (!doc.base64) continue;
+      const docKB = doc.base64.length / 1024;
+      runningTotal += docKB;
+      if (runningTotal > TOTAL_CAP_KB) {
+        console.log(`[AUDIT] Total cap reached — dropping: ${doc.filename}`);
+        doc.downloadError = 'Excluded — total payload cap reached. Presence confirmed by filename only.';
+        doc.base64 = null;
+      }
+    }
+
+    console.log(`[AUDIT] Total documents found: ${claudeDocuments.length}, readable: ${claudeDocuments.filter(d => d.base64).length}`);
 
     // ── 5. Build Claude compliance prompt ────────────────────────────────────
     const conditions = {
@@ -382,64 +397,64 @@ exports.handler = async (event) => {
   }
 };
 
-// ─── Claude API call with actual document content ─────────────────────────────
+// ─── OpenAI API call with actual document content ────────────────────────────
 
 async function callClaudeWithDocuments(folderName, conditions, documents, submittedBy) {
-  const { transactionType, yearBuilt, isPreX1978, hoaPresent, poolPresent, dualAgency, community55plus } = conditions;
-  const isBuyer = transactionType === 'BUYER';
+  // Build the compliance prompt
+  const prompt = buildCompliancePrompt(folderName, conditions, submittedBy, documents);
 
-  // Build the message content array — text prompt first, then documents
-  const messageContent = [];
+  // Build content array — text prompt first, then PDF documents as base64
+  const userContent = [];
 
-  // System instructions as first text block
-  messageContent.push({
+  userContent.push({
     type: 'text',
-    text: buildCompliancePrompt(folderName, conditions, submittedBy, documents)
+    text: prompt
   });
 
-  // Attach each PDF document that was successfully downloaded
+  // Attach each readable PDF — OpenAI accepts PDFs via file content blocks
   let documentsAttached = 0;
   for (const doc of documents) {
     if (doc.base64) {
-      messageContent.push({
-        type: 'document',
-        source: {
-          type: 'base64',
-          media_type: 'application/pdf',
-          data: doc.base64
-        },
-        title: `[${doc.folder}] ${doc.filename}`,
-        // Cache control for large repeated documents
-        cache_control: { type: 'ephemeral' }
+      userContent.push({
+        type: 'text',
+        text: `[ATTACHED DOCUMENT — ${doc.folder}: ${doc.filename} (${doc.sizeKB}KB) — Read the full content of this PDF and use it in your compliance analysis]`
+      });
+      userContent.push({
+        type: 'file',
+        file: {
+          filename: doc.filename,
+          file_data: `data:application/pdf;base64,${doc.base64}`
+        }
       });
       documentsAttached++;
     }
   }
 
-  console.log(`[CLAUDE] Sending ${documentsAttached} documents for analysis`);
+  console.log(`[OPENAI] Sending ${documentsAttached} documents for analysis`);
 
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
+    const requestBody = JSON.stringify({
+      model: 'gpt-4o',
       max_tokens: 8000,
-      system: `You are the SZREG AI Compliance Auditor for SZ Real Estate Group. You perform rigorous transaction compliance reviews by reading actual documents — not guessing from filenames. You identify True Risks (missing documents, blank signatures, unexecuted forms), Manageable Items (minor issues needing verification), and confirm Clear items with specific evidence from the documents you read. You are thorough, precise, and never infer — you only report what you can actually verify from document content.`,
       messages: [
         {
+          role: 'system',
+          content: 'You are the SZREG AI Compliance Auditor for SZ Real Estate Group. You perform rigorous transaction compliance reviews by reading actual documents — not guessing from filenames. You identify True Risks (missing documents, blank signatures, unexecuted forms), Manageable Items (minor issues needing verification), and confirm Clear items with specific evidence from the documents you read. You are thorough, precise, and never infer — you only report what you can actually verify from document content. Always respond with valid JSON only — no preamble, no markdown.'
+        },
+        {
           role: 'user',
-          content: messageContent
+          content: userContent
         }
       ]
     });
 
     const req = https.request({
-      hostname: 'api.anthropic.com',
-      path: '/v1/messages',
+      hostname: 'api.openai.com',
+      path: '/v1/chat/completions',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'pdfs-2024-09-25,files-api-2025-04-14'
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
       }
     }, res => {
       const chunks = [];
@@ -449,28 +464,29 @@ async function callClaudeWithDocuments(folderName, conditions, documents, submit
           const data = Buffer.concat(chunks).toString('utf8');
           const parsed = JSON.parse(data);
 
-          // Log full error if Claude returned an API error
+          // Check for OpenAI API error
           if (parsed.error) {
-            console.error('[CLAUDE] API error:', JSON.stringify(parsed.error));
+            console.error('[OPENAI] API error:', JSON.stringify(parsed.error));
             resolve({
-              summary: 'Claude API returned an error. See manageable items for details.',
+              summary: 'OpenAI API returned an error: ' + (parsed.error.message || JSON.stringify(parsed.error)),
               overallRisk: 'MEDIUM',
               trueRisk: [],
               manageable: [{
-                item: 'Claude API Error',
+                item: 'OpenAI API Error',
                 detail: parsed.error.message || JSON.stringify(parsed.error),
                 folder: 'System',
                 evidence: ''
               }],
               clear: [],
+              crossReferenceFindings: [],
               disclaimer: 'Audit incomplete — please re-run or contact support.'
             });
             return;
           }
 
-          const text = parsed.content?.[0]?.text || '';
-          console.log('[CLAUDE] Response length:', text.length);
-          console.log('[CLAUDE] Response preview (first 500):', text.substring(0, 500));
+          const text = parsed.choices?.[0]?.message?.content || '';
+          console.log('[OPENAI] Response length:', text.length);
+          console.log('[OPENAI] Response preview (first 500):', text.substring(0, 500));
 
           // Strip markdown code fences if present
           const clean = text
@@ -479,42 +495,42 @@ async function callClaudeWithDocuments(folderName, conditions, documents, submit
             .replace(/```\s*$/i, '')
             .trim();
 
-          // Find the JSON object — handles any preamble text
+          // Find JSON object — handles any preamble
           const jsonStart = clean.indexOf('{');
           const jsonEnd = clean.lastIndexOf('}');
           if (jsonStart === -1 || jsonEnd === -1) {
-            throw new Error('No JSON object found in Claude response');
+            throw new Error('No JSON object found in OpenAI response');
           }
           const jsonStr = clean.substring(jsonStart, jsonEnd + 1);
           const result = JSON.parse(jsonStr);
 
-          result.trueRisk   = result.trueRisk   || [];
-          result.manageable = result.manageable || [];
-          result.clear      = result.clear      || [];
+          result.trueRisk            = result.trueRisk            || [];
+          result.manageable          = result.manageable          || [];
+          result.clear               = result.clear               || [];
           result.crossReferenceFindings = result.crossReferenceFindings || [];
-          result.summary    = result.summary    || 'Audit complete.';
-          result.overallRisk = result.overallRisk || 'LOW';
-          result.disclaimer = result.disclaimer || 'Agent review required before COE.';
+          result.summary             = result.summary             || 'Audit complete.';
+          result.overallRisk         = result.overallRisk         || 'LOW';
+          result.disclaimer          = result.disclaimer          || 'Agent review required before COE.';
           resolve(result);
 
         } catch (e) {
-          console.error('[CLAUDE] Parse error:', e.message);
+          console.error('[OPENAI] Parse error:', e.message);
           const rawText = (() => {
             try {
               const data = Buffer.concat(chunks).toString('utf8');
-              return JSON.parse(data).content?.[0]?.text || data;
+              return JSON.parse(data).choices?.[0]?.message?.content || data;
             } catch (x) {
               return Buffer.concat(chunks).toString('utf8');
             }
           })();
-          console.error('[CLAUDE] Raw response (first 1000):', rawText.substring(0, 1000));
+          console.error('[OPENAI] Raw response (first 1000):', rawText.substring(0, 1000));
           resolve({
-            summary: 'Compliance analysis completed but response format error occurred. Check Netlify function logs for raw Claude output.',
+            summary: 'Compliance analysis completed but response format error occurred.',
             overallRisk: 'MEDIUM',
             trueRisk: [],
             manageable: [{
               item: 'Report Parse Error',
-              detail: 'Claude response could not be parsed as JSON. Check Netlify logs.',
+              detail: 'OpenAI response could not be parsed as JSON.',
               folder: 'System',
               evidence: rawText.substring(0, 300)
             }],
@@ -526,7 +542,7 @@ async function callClaudeWithDocuments(folderName, conditions, documents, submit
       });
     });
     req.on('error', reject);
-    req.write(body);
+    req.write(requestBody);
     req.end();
   });
 }
