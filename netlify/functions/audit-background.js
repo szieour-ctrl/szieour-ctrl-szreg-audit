@@ -365,7 +365,7 @@ exports.handler = async (event) => {
       readCount: readFiles.length,
       inventoryCount: inventoryFiles.length,
       report: auditReport,
-      reportFormatted: formatReport(txFolder.name, auditReport, submittedBy, auditDate, conditions, readFiles.length, inventoryFiles.length)
+      reportFormatted: formatReport(txFolder.name, auditReport, submittedBy, auditDate, conditions, readFiles.length, inventoryFiles.length, readFiles, inventoryFiles)
     });
 
     console.log('[AUDIT] Pabbly webhook fired — done');
@@ -861,23 +861,29 @@ RATING DEFINITIONS
 ═══════════════════════════════════════════════════════
 OUTPUT — RETURN ONLY THIS JSON, NO OTHER TEXT
 ═══════════════════════════════════════════════════════
+
+MANDATORY RULE: Every single attached document in this batch MUST appear in either
+trueRisk, manageable, OR clear. No attached document may be omitted from the output.
+If a document appears executed with no issues, add it to clear with its Authentisign ID or key evidence.
+Do not group multiple documents under one item — each document gets its own entry.
+
 {
-  "summary": "3-4 sentence overall assessment. Specify what was read vs inventoried. Call out any material findings.",
+  "summary": "2-3 sentence assessment of THIS batch only. Name specific documents reviewed. Call out any findings.",
   "overallRisk": "HIGH | MEDIUM | LOW",
   "trueRisk": [
-    { "item": "name", "detail": "specific finding", "evidence": "exact text/ID cited from document", "folder": "E1/E2/E3/E4/E5" }
+    { "item": "exact filename or document name", "detail": "specific finding with page/section reference", "evidence": "exact text, ID, or data point from the document", "folder": "E1/E2/E3/E4/E5" }
   ],
   "manageable": [
-    { "item": "name", "detail": "finding and recommended action", "evidence": "what was found", "folder": "E1/E2/E3/E4/E5" }
+    { "item": "exact filename or document name", "detail": "finding and recommended action", "evidence": "specific text found", "folder": "E1/E2/E3/E4/E5" }
   ],
   "clear": [
-    { "item": "name", "detail": "confirmed present and executed", "evidence": "party names, Authentisign ID, key data verified", "folder": "E1/E2/E3/E4/E5" }
+    { "item": "exact filename or document name", "detail": "confirmed present and executed", "evidence": "Authentisign ID, party names, execution date confirmed", "folder": "E1/E2/E3/E4/E5" }
   ],
   "inventoryConfirmed": [
-    { "item": "filename", "detail": "Present by filename — not read", "folder": "E1/E2/E3/E4/E5" }
+    { "item": "exact filename", "detail": "Present by filename — not read", "folder": "E1/E2/E3/E4/E5" }
   ],
   "crossReferenceFindings": [
-    { "check": "check description", "result": "PASS | FAIL | UNABLE TO VERIFY", "detail": "specific finding" }
+    { "check": "specific check description", "result": "PASS | FAIL | UNABLE TO VERIFY", "detail": "specific finding or reason unable to verify" }
   ],
   "disclaimer": "This report reflects AI analysis of actual document content (read files) and filename confirmation (inventory files). It does not constitute legal review. Agent verification required before COE. SZ Real Estate Group."
 }`;
@@ -885,7 +891,7 @@ OUTPUT — RETURN ONLY THIS JSON, NO OTHER TEXT
 
 // ─── Format report as plain text for email / Google Doc ───────────────────────
 
-function formatReport(folderName, report, submittedBy, auditDate, conditions, readCount, inventoryCount) {
+function formatReport(folderName, report, submittedBy, auditDate, conditions, readCount, inventoryCount, readFiles = [], inventoryFiles = []) {
   const riskEmoji  = { HIGH: '🔴', MEDIUM: '🟡', LOW: '✅' };
   const riskLabel  = { HIGH: 'HIGH RISK — Action Required Before COE', MEDIUM: 'MEDIUM RISK — Review Items Below', LOW: 'LOW RISK — File Appears Complete' };
   const lines = [];
@@ -904,6 +910,23 @@ function formatReport(folderName, report, submittedBy, auditDate, conditions, re
   lines.push('SUMMARY');
   lines.push('───────────────────────────────────────────────────────');
   lines.push(report.summary);
+  lines.push('');
+
+  // Full document index
+  lines.push('DOCUMENTS REVIEWED');
+  lines.push('───────────────────────────────────────────────────────');
+  if (readFiles.length > 0) {
+    lines.push('Read & Audited:');
+    for (const f of readFiles) {
+      lines.push(`  ✅ [${f.folder}] ${f.filename} (${f.sizeKB}KB)`);
+    }
+  }
+  if (inventoryFiles.length > 0) {
+    lines.push('Inventory Confirmed (not read):');
+    for (const f of inventoryFiles) {
+      lines.push(`  📋 [${f.folder}] ${f.filename} (${f.sizeKB}KB)`);
+    }
+  }
   lines.push('');
 
   if (report.trueRisk?.length) {
