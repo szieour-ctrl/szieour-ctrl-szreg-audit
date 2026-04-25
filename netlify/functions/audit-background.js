@@ -373,86 +373,291 @@ exports.handler = async (event) => {
   }
 };
 
-// ─── OpenAI call ──────────────────────────────────────────────────────────────
+// ─── OpenAI Assistants API call ──────────────────────────────────────────────
 
 async function callOpenAI(folderName, conditions, readFiles, inventoryFiles, submittedBy) {
   const prompt = buildPrompt(folderName, conditions, submittedBy, readFiles, inventoryFiles);
+  const apiKey = process.env.OPENAI_API_KEY;
 
-  // Build message content — prompt first, then each PDF
-  const userContent = [{ type: 'text', text: prompt }];
-
+  // ── Step 1: Upload each PDF to OpenAI Files API ─────────────────────────
+  const fileIds = [];
   for (const doc of readFiles) {
-    userContent.push({
-      type: 'text',
-      text: `\n--- DOCUMENT: [${doc.folder}] ${doc.filename} (${doc.sizeKB}KB) ---`
-    });
-    userContent.push({
-      type: 'image_url',
-      image_url: { url: `data:application/pdf;base64,${doc.base64}`, detail: 'high' }
-    });
+    try {
+      const fileId = await uploadFileToOpenAI(doc, apiKey);
+      fileIds.push({ fileId, doc });
+      console.log(`[OPENAI] Uploaded: ${doc.filename} → ${fileId}`);
+    } catch (err) {
+      console.error(`[OPENAI] Upload failed for ${doc.filename}:`, err.message);
+      // Demote to inventory if upload fails
+      doc.uploadFailed = true;
+      inventoryFiles.push({ ...doc, skipReason: 'Upload to OpenAI failed: ' + err.message });
+    }
+  }
+  console.log(`[OPENAI] ${fileIds.length} files uploaded successfully`);
+
+  // ── Step 2: Create Assistant ────────────────────────────────────────────
+  const assistantId = await createAssistant(apiKey);
+  console.log(`[OPENAI] Assistant created: ${assistantId}`);
+
+  // ── Step 3: Create Thread ───────────────────────────────────────────────
+  const threadId = await createThread(apiKey);
+  console.log(`[OPENAI] Thread created: ${threadId}`);
+
+  // ── Step 4: Add message with all files attached ─────────────────────────
+  const attachments = fileIds.map(({ fileId }) => ({
+    file_id: fileId,
+    tools: [{ type: 'file_search' }]
+  }));
+
+  await addMessageToThread(threadId, prompt, attachments, apiKey);
+  console.log(`[OPENAI] Message added with ${attachments.length} attachments`);
+
+  // ── Step 5: Run the Assistant ───────────────────────────────────────────
+  const runId = await runAssistant(assistantId, threadId, apiKey);
+  console.log(`[OPENAI] Run started: ${runId}`);
+
+  // ── Step 6: Poll for completion ─────────────────────────────────────────
+  const runResult = await pollForCompletion(threadId, runId, apiKey);
+  console.log(`[OPENAI] Run status: ${runResult.status}`);
+
+  if (runResult.status !== 'completed') {
+    return errorReport(`Assistant run did not complete. Status: ${runResult.status}`);
   }
 
-  console.log(`[OPENAI] Sending ${readFiles.length} documents`);
+  // ── Step 7: Get response ────────────────────────────────────────────────
+  const responseText = await getThreadResponse(threadId, apiKey);
+  console.log('[OPENAI] Response length:', responseText.length);
+  console.log('[OPENAI] Response preview:', responseText.substring(0, 300));
 
+  // ── Step 8: Cleanup — delete uploaded files ─────────────────────────────
+  for (const { fileId } of fileIds) {
+    try { await deleteFile(fileId, apiKey); } catch (e) { /* non-fatal */ }
+  }
+  try { await deleteAssistant(assistantId, apiKey); } catch (e) { /* non-fatal */ }
+
+  // ── Step 9: Parse response ──────────────────────────────────────────────
+  try {
+    const clean = responseText
+      .replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+    const jsonStart = clean.indexOf('{');
+    const jsonEnd = clean.lastIndexOf('}');
+    if (jsonStart === -1 || jsonEnd === -1) throw new Error('No JSON in response');
+    const result = JSON.parse(clean.substring(jsonStart, jsonEnd + 1));
+    result.trueRisk               = result.trueRisk               || [];
+    result.manageable             = result.manageable             || [];
+    result.clear                  = result.clear                  || [];
+    result.inventoryConfirmed     = result.inventoryConfirmed     || [];
+    result.crossReferenceFindings = result.crossReferenceFindings || [];
+    result.summary                = result.summary                || 'Audit complete.';
+    result.overallRisk            = result.overallRisk            || 'LOW';
+    result.disclaimer             = result.disclaimer             || 'Agent review required before COE.';
+    return result;
+  } catch (e) {
+    console.error('[OPENAI] Parse error:', e.message);
+    console.error('[OPENAI] Raw response:', responseText.substring(0, 1000));
+    return errorReport('Response parse error: ' + e.message + ' | Raw: ' + responseText.substring(0, 200));
+  }
+}
+
+// ─── OpenAI API helpers ───────────────────────────────────────────────────────
+
+function uploadFileToOpenAI(doc, apiKey) {
   return new Promise((resolve, reject) => {
-    const requestBody = JSON.stringify({
-      model: 'gpt-4o',
-      max_tokens: 8000,
-      messages: [
-        {
-          role: 'system',
-          content: 'You are the SZREG AI Compliance Auditor for SZ Real Estate Group. You read actual transaction documents and perform rigorous compliance review. You never guess or infer — you only report what you can directly verify from document content. Always respond with valid JSON only. No preamble, no markdown, no explanation outside the JSON structure.'
-        },
-        { role: 'user', content: userContent }
-      ]
-    });
+    const fileBuffer = Buffer.from(doc.base64, 'base64');
+    const boundary = '----FormBoundary' + Math.random().toString(36).substring(2);
+    const filename = doc.filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+
+    const bodyParts = [];
+    bodyParts.push(Buffer.from(
+      `--${boundary}
+Content-Disposition: form-data; name="purpose"
+
+assistants
+`
+    ));
+    bodyParts.push(Buffer.from(
+      `--${boundary}
+Content-Disposition: form-data; name="file"; filename="${filename}"
+Content-Type: application/pdf
+
+`
+    ));
+    bodyParts.push(fileBuffer);
+    bodyParts.push(Buffer.from(`
+--${boundary}--
+`));
+    const body = Buffer.concat(bodyParts);
 
     const req = https.request({
       hostname: 'api.openai.com',
-      path: '/v1/chat/completions',
+      path: '/v1/files',
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': body.length
       }
     }, res => {
       const chunks = [];
-      res.on('data', c => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+      res.on('data', c => chunks.push(c));
       res.on('end', () => {
         try {
-          const data = Buffer.concat(chunks).toString('utf8');
-          const parsed = JSON.parse(data);
-          if (parsed.error) {
-            console.error('[OPENAI] API error:', JSON.stringify(parsed.error));
-            resolve(errorReport('OpenAI API error: ' + (parsed.error.message || JSON.stringify(parsed.error))));
-            return;
-          }
-          const text = parsed.choices?.[0]?.message?.content || '';
-          console.log('[OPENAI] Response length:', text.length);
-          const clean = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-          const jsonStart = clean.indexOf('{');
-          const jsonEnd = clean.lastIndexOf('}');
-          if (jsonStart === -1 || jsonEnd === -1) throw new Error('No JSON in response');
-          const result = JSON.parse(clean.substring(jsonStart, jsonEnd + 1));
-          result.trueRisk            = result.trueRisk            || [];
-          result.manageable          = result.manageable          || [];
-          result.clear               = result.clear               || [];
-          result.inventoryConfirmed  = result.inventoryConfirmed  || [];
-          result.crossReferenceFindings = result.crossReferenceFindings || [];
-          result.summary             = result.summary             || 'Audit complete.';
-          result.overallRisk         = result.overallRisk         || 'LOW';
-          result.disclaimer          = result.disclaimer          || 'Agent review required before COE.';
-          resolve(result);
-        } catch (e) {
-          console.error('[OPENAI] Parse error:', e.message);
-          const raw = (() => { try { return Buffer.concat(chunks).toString('utf8'); } catch(x) { return ''; } })();
-          console.error('[OPENAI] Raw (first 1000):', raw.substring(0, 1000));
-          resolve(errorReport('Response parse error: ' + e.message));
-        }
+          const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          if (data.error) reject(new Error(data.error.message || JSON.stringify(data.error)));
+          else resolve(data.id);
+        } catch (e) { reject(e); }
       });
     });
-    req.on('error', err => { console.error('[OPENAI] Request error:', err.message); resolve(errorReport(err.message)); });
-    req.write(requestBody);
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+function createAssistant(apiKey) {
+  return openAIPost('/v1/assistants', {
+    model: 'gpt-4o',
+    name: 'SZREG Compliance Auditor',
+    instructions: 'You are the SZREG AI Compliance Auditor for SZ Real Estate Group. You read actual transaction documents and perform rigorous compliance review. You never guess or infer — you only report what you can directly verify from document content. Always respond with valid JSON only. No preamble, no markdown, no explanation outside the JSON structure.',
+    tools: [{ type: 'file_search' }]
+  }, apiKey).then(data => {
+    if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+    return data.id;
+  });
+}
+
+function createThread(apiKey) {
+  return openAIPost('/v1/threads', {}, apiKey).then(data => {
+    if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+    return data.id;
+  });
+}
+
+function addMessageToThread(threadId, prompt, attachments, apiKey) {
+  return openAIPost(`/v1/threads/${threadId}/messages`, {
+    role: 'user',
+    content: prompt,
+    attachments: attachments.length > 0 ? attachments : undefined
+  }, apiKey).then(data => {
+    if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+    return data.id;
+  });
+}
+
+function runAssistant(assistantId, threadId, apiKey) {
+  return openAIPost(`/v1/threads/${threadId}/runs`, {
+    assistant_id: assistantId,
+    max_completion_tokens: 8000
+  }, apiKey).then(data => {
+    if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+    return data.id;
+  });
+}
+
+function pollForCompletion(threadId, runId, apiKey, maxWaitMs = 600000) {
+  return new Promise((resolve, reject) => {
+    const startTime = Date.now();
+    const poll = () => {
+      openAIGet(`/v1/threads/${threadId}/runs/${runId}`, apiKey).then(data => {
+        const status = data.status;
+        console.log(`[OPENAI] Poll status: ${status}`);
+        if (['completed', 'failed', 'cancelled', 'expired'].includes(status)) {
+          resolve(data);
+        } else if (Date.now() - startTime > maxWaitMs) {
+          resolve({ status: 'timeout' });
+        } else {
+          setTimeout(poll, 3000); // poll every 3 seconds
+        }
+      }).catch(reject);
+    };
+    poll();
+  });
+}
+
+function getThreadResponse(threadId, apiKey) {
+  return openAIGet(`/v1/threads/${threadId}/messages`, apiKey).then(data => {
+    if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+    // Get the first assistant message
+    const assistantMsg = (data.data || []).find(m => m.role === 'assistant');
+    if (!assistantMsg) throw new Error('No assistant message found in thread');
+    // Extract text content
+    const textBlock = (assistantMsg.content || []).find(c => c.type === 'text');
+    if (!textBlock) throw new Error('No text content in assistant message');
+    return textBlock.text.value || '';
+  });
+}
+
+function deleteFile(fileId, apiKey) {
+  return new Promise((resolve) => {
+    const req = https.request({
+      hostname: 'api.openai.com',
+      path: `/v1/files/${fileId}`,
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${apiKey}` }
+    }, res => { res.resume(); res.on('end', resolve); });
+    req.on('error', resolve); // non-fatal
+    req.end();
+  });
+}
+
+function deleteAssistant(assistantId, apiKey) {
+  return new Promise((resolve) => {
+    const req = https.request({
+      hostname: 'api.openai.com',
+      path: `/v1/assistants/${assistantId}`,
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'OpenAI-Beta': 'assistants=v2' }
+    }, res => { res.resume(); res.on('end', resolve); });
+    req.on('error', resolve); // non-fatal
+    req.end();
+  });
+}
+
+function openAIPost(path, payload, apiKey) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload);
+    const req = https.request({
+      hostname: 'api.openai.com',
+      path,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'OpenAI-Beta': 'assistants=v2'
+      }
+    }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
+        catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+function openAIGet(path, apiKey) {
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'api.openai.com',
+      path,
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'OpenAI-Beta': 'assistants=v2'
+      }
+    }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
+        catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
     req.end();
   });
 }
