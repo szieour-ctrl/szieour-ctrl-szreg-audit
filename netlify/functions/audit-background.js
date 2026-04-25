@@ -365,7 +365,8 @@ exports.handler = async (event) => {
       readCount: readFiles.length,
       inventoryCount: inventoryFiles.length,
       report: auditReport,
-      reportFormatted: formatReport(txFolder.name, auditReport, submittedBy, auditDate, conditions, readFiles.length, inventoryFiles.length, readFiles, inventoryFiles)
+      reportFormatted: formatReport(txFolder.name, auditReport, submittedBy, auditDate, conditions, readFiles.length, inventoryFiles.length, readFiles, inventoryFiles),
+      reportHTML: formatReportHTML(txFolder.name, auditReport, submittedBy, auditDate, conditions, readFiles.length, inventoryFiles.length, readFiles, inventoryFiles)
     });
 
     console.log('[AUDIT] Pabbly webhook fired — done');
@@ -1060,4 +1061,148 @@ function formatReport(folderName, report, submittedBy, auditDate, conditions, re
   lines.push('Samuel K. Zieour, Realtor · Co-Founder & Team Lead · DRE #01397303');
 
   return lines.join('\n');
+}
+
+// ─── HTML report formatter for email + Google Doc ─────────────────────────────
+
+function formatReportHTML(folderName, report, submittedBy, auditDate, conditions, readCount, inventoryCount, readFiles = [], inventoryFiles = []) {
+  const riskColor  = { HIGH: '#c0392b', MEDIUM: '#d4860a', LOW: '#1e7a4b' };
+  const riskLabel  = { HIGH: 'HIGH RISK — Action Required Before COE', MEDIUM: 'MEDIUM RISK — Review Items Below', LOW: 'LOW RISK — File Appears Complete' };
+  const riskBg     = { HIGH: '#fdf0ef', MEDIUM: '#fef9ee', LOW: '#edf7f2' };
+  const risk = report.overallRisk || 'MEDIUM';
+
+  const s = (text) => `<span style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;">${text}</span>`;
+
+  let h = '';
+
+  // ── Header ──────────────────────────────────────────────────────────────────
+  h += `<div style="background:#0a1628;padding:24px 32px;margin-bottom:0;">`;
+  h += `<table width="100%" cellpadding="0" cellspacing="0"><tr>`;
+  h += `<td><span style="font-family:Arial,sans-serif;font-size:11px;font-weight:bold;color:#c9a84c;letter-spacing:3px;text-transform:uppercase;">SZ REAL ESTATE GROUP</span><br>`;
+  h += `<span style="font-family:Arial,sans-serif;font-size:18px;font-weight:bold;color:#ffffff;">AI Compliance Audit Report</span></td>`;
+  h += `<td align="right"><span style="font-family:Arial,sans-serif;font-size:11px;color:rgba(255,255,255,0.5);">DRE #02066500</span></td>`;
+  h += `</tr></table></div>`;
+
+  // ── Transaction meta ─────────────────────────────────────────────────────────
+  h += `<div style="background:#112040;padding:16px 32px;margin-bottom:24px;">`;
+  h += `<table width="100%" cellpadding="0" cellspacing="0"><tr>`;
+  h += `<td><span style="font-family:Arial,sans-serif;font-size:12px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;">Transaction</span><br>`;
+  h += `<span style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#ffffff;">${folderName}</span></td>`;
+  h += `<td><span style="font-family:Arial,sans-serif;font-size:12px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;">Audited By</span><br>`;
+  h += `<span style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#ffffff;">${submittedBy}</span></td>`;
+  h += `<td><span style="font-family:Arial,sans-serif;font-size:12px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;">Date</span><br>`;
+  h += `<span style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#ffffff;">${auditDate}</span></td>`;
+  h += `<td><span style="font-family:Arial,sans-serif;font-size:12px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;">Documents</span><br>`;
+  h += `<span style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#ffffff;">${readCount} read | ${inventoryCount} inventory</span></td>`;
+  h += `</tr></table></div>`;
+
+  // ── Risk banner ───────────────────────────────────────────────────────────────
+  h += `<div style="background:${riskBg[risk]};border-left:5px solid ${riskColor[risk]};padding:16px 24px;margin:0 24px 24px;border-radius:4px;">`;
+  h += `<span style="font-family:Arial,sans-serif;font-size:16px;font-weight:bold;color:${riskColor[risk]};">`;
+  h += `${risk === 'HIGH' ? '🔴' : risk === 'MEDIUM' ? '🟡' : '✅'} ${riskLabel[risk]}</span>`;
+  h += `</div>`;
+
+  // ── Summary ───────────────────────────────────────────────────────────────────
+  h += `<div style="padding:0 24px 24px;">`;
+  h += `<p style="font-family:Arial,sans-serif;font-size:14px;color:#444;line-height:1.7;margin:0 0 24px;">${report.summary || ''}</p>`;
+
+  // ── Documents reviewed ────────────────────────────────────────────────────────
+  h += `<div style="margin-bottom:24px;">`;
+  h += `<h3 style="font-family:Arial,sans-serif;font-size:11px;font-weight:bold;color:#888;letter-spacing:2px;text-transform:uppercase;margin:0 0 12px;border-bottom:1px solid #e8e8e8;padding-bottom:8px;">DOCUMENTS REVIEWED</h3>`;
+
+  if (readFiles.length > 0) {
+    h += `<p style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#444;margin:0 0 6px;">Read & Audited (${readFiles.length} files):</p>`;
+    h += `<table width="100%" cellpadding="2" cellspacing="0" style="margin-bottom:12px;">`;
+    for (const f of readFiles) {
+      h += `<tr><td style="font-family:Arial,sans-serif;font-size:12px;color:#1e7a4b;">✅</td>`;
+      h += `<td style="font-family:Arial,sans-serif;font-size:12px;color:#444;">${f.filename}</td>`;
+      h += `<td style="font-family:Arial,sans-serif;font-size:11px;color:#999;text-align:right;">${f.folder} · ${f.sizeKB}KB</td></tr>`;
+    }
+    h += `</table>`;
+  }
+
+  if (inventoryFiles.length > 0) {
+    h += `<p style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#444;margin:0 0 6px;">Inventory Confirmed — Not Read (${inventoryFiles.length} files):</p>`;
+    h += `<table width="100%" cellpadding="2" cellspacing="0" style="margin-bottom:12px;">`;
+    for (const f of inventoryFiles) {
+      h += `<tr><td style="font-family:Arial,sans-serif;font-size:12px;color:#888;">📋</td>`;
+      h += `<td style="font-family:Arial,sans-serif;font-size:12px;color:#888;">${f.filename}</td>`;
+      h += `<td style="font-family:Arial,sans-serif;font-size:11px;color:#bbb;text-align:right;">${f.folder} · ${f.sizeKB}KB</td></tr>`;
+    }
+    h += `</table>`;
+  }
+  h += `</div>`;
+
+  // ── Helper: render a findings section ─────────────────────────────────────────
+  function section(items, emoji, label, borderColor, bgColor, textColor) {
+    if (!items || !items.length) return '';
+    let out = `<div style="margin-bottom:24px;">`;
+    out += `<h3 style="font-family:Arial,sans-serif;font-size:11px;font-weight:bold;color:${textColor};letter-spacing:2px;text-transform:uppercase;margin:0 0 12px;border-bottom:2px solid ${borderColor};padding-bottom:8px;">${emoji} ${label}</h3>`;
+    for (const item of items) {
+      out += `<div style="background:${bgColor};border-left:3px solid ${borderColor};padding:12px 16px;margin-bottom:10px;border-radius:0 4px 4px 0;">`;
+      out += `<p style="font-family:Arial,sans-serif;font-size:13px;font-weight:bold;color:#222;margin:0 0 4px;">${item.item || ''} <span style="font-weight:normal;color:#888;font-size:11px;">[${item.folder || ''}]</span></p>`;
+      if (item.detail) out += `<p style="font-family:Arial,sans-serif;font-size:12px;color:#555;margin:0 0 4px;"><strong>Finding:</strong> ${item.detail}</p>`;
+      if (item.evidence) out += `<p style="font-family:Arial,sans-serif;font-size:12px;color:#555;margin:0;"><strong>Evidence:</strong> ${item.evidence}</p>`;
+      out += `</div>`;
+    }
+    out += `</div>`;
+    return out;
+  }
+
+  // ── Risk sections ─────────────────────────────────────────────────────────────
+  h += section(report.trueRisk,    '🔴', 'TRUE RISK — ACTION REQUIRED BEFORE COE', '#c0392b', '#fdf0ef', '#c0392b');
+  h += section(report.manageable,  '🟡', 'MANAGEABLE — VERIFY BEFORE COE',         '#d4860a', '#fef9ee', '#d4860a');
+
+  if (report.humanCheck && report.humanCheck.length) {
+    h += `<div style="margin-bottom:24px;">`;
+    h += `<h3 style="font-family:Arial,sans-serif;font-size:11px;font-weight:bold;color:#1a5fa8;letter-spacing:2px;text-transform:uppercase;margin:0 0 6px;border-bottom:2px solid #2980b9;padding-bottom:8px;">🔵 HUMAN CHECK — LOW RISK — VERIFY BEFORE COE</h3>`;
+    h += `<p style="font-family:Arial,sans-serif;font-size:12px;color:#555;margin:0 0 12px;font-style:italic;">Authentisign ID confirmed on these documents. AI flagged a possible incomplete signature or initial block. Agent should visually verify before COE.</p>`;
+    for (const item of report.humanCheck) {
+      h += `<div style="background:#eef6fb;border-left:3px solid #2980b9;padding:12px 16px;margin-bottom:10px;border-radius:0 4px 4px 0;">`;
+      h += `<p style="font-family:Arial,sans-serif;font-size:13px;font-weight:bold;color:#222;margin:0 0 4px;">${item.item || ''} <span style="font-weight:normal;color:#888;font-size:11px;">[${item.folder || ''}]</span></p>`;
+      if (item.detail) h += `<p style="font-family:Arial,sans-serif;font-size:12px;color:#555;margin:0 0 4px;"><strong>Finding:</strong> ${item.detail}</p>`;
+      if (item.evidence) h += `<p style="font-family:Arial,sans-serif;font-size:12px;color:#555;margin:0;"><strong>Evidence:</strong> ${item.evidence}</p>`;
+      h += `</div>`;
+    }
+    h += `</div>`;
+  }
+
+  h += section(report.clear, '✅', 'CLEAR — CONFIRMED PRESENT & EXECUTED', '#1e7a4b', '#edf7f2', '#1e7a4b');
+
+  // ── Inventory confirmed ───────────────────────────────────────────────────────
+  if (report.inventoryConfirmed && report.inventoryConfirmed.length) {
+    h += `<div style="margin-bottom:24px;">`;
+    h += `<h3 style="font-family:Arial,sans-serif;font-size:11px;font-weight:bold;color:#888;letter-spacing:2px;text-transform:uppercase;margin:0 0 12px;border-bottom:1px solid #e8e8e8;padding-bottom:8px;">📋 INVENTORY CONFIRMED — PRESENT (NOT READ)</h3>`;
+    h += `<table width="100%" cellpadding="3" cellspacing="0">`;
+    for (const item of report.inventoryConfirmed) {
+      h += `<tr><td style="font-family:Arial,sans-serif;font-size:12px;color:#888;">📋 ${item.item || ''}</td>`;
+      h += `<td style="font-family:Arial,sans-serif;font-size:11px;color:#bbb;text-align:right;">[${item.folder || ''}]</td></tr>`;
+    }
+    h += `</table></div>`;
+  }
+
+  // ── Cross-reference checks ────────────────────────────────────────────────────
+  if (report.crossReferenceFindings && report.crossReferenceFindings.length) {
+    h += `<div style="margin-bottom:24px;">`;
+    h += `<h3 style="font-family:Arial,sans-serif;font-size:11px;font-weight:bold;color:#555;letter-spacing:2px;text-transform:uppercase;margin:0 0 12px;border-bottom:1px solid #e8e8e8;padding-bottom:8px;">🔍 CROSS-REFERENCE CHECKS</h3>`;
+    for (const c of report.crossReferenceFindings) {
+      const icon = c.result === 'PASS' ? '✅' : c.result === 'FAIL' ? '🔴' : '🟡';
+      const color = c.result === 'PASS' ? '#1e7a4b' : c.result === 'FAIL' ? '#c0392b' : '#d4860a';
+      h += `<div style="padding:8px 0;border-bottom:1px solid #f0f0f0;">`;
+      h += `<span style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:${color};">${icon} ${c.check || ''}: ${c.result || ''}</span>`;
+      if (c.detail) h += `<br><span style="font-family:Arial,sans-serif;font-size:12px;color:#777;padding-left:20px;">${c.detail}</span>`;
+      h += `</div>`;
+    }
+    h += `</div>`;
+  }
+
+  // ── Disclaimer + footer ───────────────────────────────────────────────────────
+  h += `<div style="background:#f7f7f7;border-top:1px solid #e8e8e8;padding:16px 24px;margin:0 -24px -24px;border-radius:0 0 6px 6px;">`;
+  h += `<p style="font-family:Arial,sans-serif;font-size:11px;color:#999;margin:0 0 6px;line-height:1.5;">${report.disclaimer || ''}</p>`;
+  h += `<p style="font-family:Arial,sans-serif;font-size:11px;color:#bbb;margin:0;">SZ Real Estate Group · DRE #02066500 · Samuel K. Zieour, Realtor · Co-Founder & Team Lead · DRE #01397303</p>`;
+  h += `</div>`;
+
+  h += `</div>`; // close main padding div
+
+  return h;
 }
