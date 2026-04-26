@@ -415,7 +415,11 @@ exports.handler = async (event) => {
     const xrefByTopic = new Map();
     const resultRank = { PASS: 2, FAIL: 1, 'UNABLE TO VERIFY': 0 };
     for (const c of allFindings.crossReferenceFindings) {
-      const topic = (c.check || '').toLowerCase().trim().split(/\s+/).slice(0, 4).join(' ');
+      // Normalize check names so variants merge: 'Commission %' == 'Commission percentage verification'
+      const topic = (c.check || '').toLowerCase()
+        .replace(/%/g, 'percentage')
+        .replace(/\b(verification|consistency|requirement|alignment|correlation)\b/gi, '')
+        .trim().split(/\s+/).filter(Boolean).slice(0, 2).join(' ');
       const existing = xrefByTopic.get(topic);
       const thisRank = resultRank[c.result] ?? 0;
       const existingRank = existing ? (resultRank[existing.result] ?? 0) : -1;
