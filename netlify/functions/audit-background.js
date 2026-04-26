@@ -516,21 +516,10 @@ function deleteFile(fileId, apiKey) {
 // ─── Process a small group of files through OpenAI Chat Completions ───────────
 
 async function processFileGroup(files, allFilenames, folderName, conditions, submittedBy, inventoryFiles, apiKey) {
-  // Upload each file to OpenAI Files API
-  const uploadedFiles = [];
-  for (const doc of files) {
-    try {
-      const fileId = await uploadFileToOpenAI(doc, apiKey);
-      uploadedFiles.push({ fileId, doc });
-      console.log(`[OPENAI] Uploaded: ${doc.filename} → ${fileId}`);
-    } catch (err) {
-      console.error(`[OPENAI] Upload failed: ${doc.filename}`, err.message);
-    }
-  }
-
-  if (uploadedFiles.length === 0) {
-    throw new Error('All uploads failed for this group');
-  }
+  // No upload needed — send base64 directly in Chat Completions message
+  // Chat Completions reads PDFs inline as base64 document blocks
+  const uploadedFiles = files.map(f => ({ doc: f, fileId: null }));
+  console.log(`[OPENAI] Processing ${files.length} files inline (no upload needed)`);
 
   // Build prompt for this group
   const fileList = files.map(f => `  • [${f.folder}] ${f.filename} (${f.sizeKB}KB)`).join('\n');
@@ -626,48 +615,56 @@ Return ONLY valid JSON — no preamble, no markdown backticks:
 
   const result = await openAIChatCompletion(prompt, uploadedFiles, apiKey);
 
-  // Cleanup uploaded files
-  for (const { fileId } of uploadedFiles) {
-    try { await deleteFile(fileId, apiKey); } catch (e) {}
-  }
+  // No cleanup needed — no files were uploaded to OpenAI
 
   return result;
 }
 
-// ─── OpenAI Chat Completion with PDF file references ─────────────────────────
+// ─── Claude API with native PDF document blocks ───────────────────────────────
+// Claude natively supports PDF as document blocks — no conversion needed
+// Groups of 5 files stay well under the per-request size limit
 
 async function openAIChatCompletion(prompt, uploadedFiles, apiKey) {
   return new Promise((resolve, reject) => {
-    // Build message with text prompt + file references
-    const userContent = [{ type: 'text', text: prompt }];
+    // Build message content — PDF documents first, then prompt
+    const messageContent = [];
 
-    // Reference each uploaded file by ID for GPT-4o to read
-    for (const { fileId, doc } of uploadedFiles) {
-      userContent.push({
-        type: 'text',
-        text: `[Document attached: ${doc.filename} — file_id: ${fileId}]`
-      });
+    for (const { doc } of uploadedFiles) {
+      if (doc.base64) {
+        // Claude native PDF document block
+        messageContent.push({
+          type: 'document',
+          source: {
+            type: 'base64',
+            media_type: 'application/pdf',
+            data: doc.base64
+          },
+          title: `[${doc.folder}] ${doc.filename} (${doc.sizeKB}KB)`
+        });
+      }
     }
 
+    // Add the analysis prompt after documents
+    messageContent.push({ type: 'text', text: prompt });
+
     const requestBody = JSON.stringify({
-      model: 'gpt-4o',
+      model: 'claude-sonnet-4-20250514',
       max_tokens: 4000,
-      messages: [
-        {
-          role: 'system',
-          content: 'You are the SZREG AI Compliance Auditor. Read the attached transaction documents and perform compliance review. Return only valid JSON — no preamble, no markdown backticks.'
-        },
-        { role: 'user', content: userContent }
-      ]
+      system: 'You are the SZREG AI Compliance Auditor for SZ Real Estate Group. You read actual transaction documents and perform rigorous compliance review. You never fabricate IDs, names, or data. You only report what you can directly read from document content. Return only valid JSON — no preamble, no markdown backticks.',
+      messages: [{ role: 'user', content: messageContent }]
     });
 
+    const claudeApiKey = process.env.ANTHROPIC_API_KEY;
+
     const req = https.request({
-      hostname: 'api.openai.com',
-      path: '/v1/chat/completions',
+      hostname: 'api.anthropic.com',
+      path: '/v1/messages',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
+        'x-api-key': claudeApiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'pdfs-2024-09-25'
       }
     }, res => {
       const chunks = [];
@@ -677,12 +674,12 @@ async function openAIChatCompletion(prompt, uploadedFiles, apiKey) {
           const data = Buffer.concat(chunks).toString('utf8');
           const parsed = JSON.parse(data);
           if (parsed.error) {
-            console.error('[OPENAI] Chat error:', JSON.stringify(parsed.error));
-            resolve(errorReport('OpenAI error: ' + (parsed.error.message || JSON.stringify(parsed.error))));
+            console.error('[CLAUDE] API error:', JSON.stringify(parsed.error));
+            resolve(errorReport('Claude API error: ' + (parsed.error.message || JSON.stringify(parsed.error))));
             return;
           }
-          const text = parsed.choices?.[0]?.message?.content || '';
-          console.log('[OPENAI] Response length:', text.length);
+          const text = parsed.content?.[0]?.text || '';
+          console.log('[CLAUDE] Response length:', text.length);
           const clean = text.replace(/^```json\s*/i,'').replace(/^```\s*/i,'').replace(/```\s*$/i,'').trim();
           const jsonStart = clean.indexOf('{');
           const jsonEnd = clean.lastIndexOf('}');
@@ -696,13 +693,13 @@ async function openAIChatCompletion(prompt, uploadedFiles, apiKey) {
           result.crossReferenceFindings = result.crossReferenceFindings || [];
           resolve(result);
         } catch (e) {
-          console.error('[OPENAI] Parse error:', e.message);
+          console.error('[CLAUDE] Parse error:', e.message);
           resolve(errorReport('Parse error: ' + e.message));
         }
       });
     });
     req.on('error', err => {
-      console.error('[OPENAI] Request error:', err.message);
+      console.error('[CLAUDE] Request error:', err.message);
       resolve(errorReport(err.message));
     });
     req.write(requestBody);
