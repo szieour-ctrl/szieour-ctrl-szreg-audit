@@ -967,10 +967,16 @@ trueRisk, manageable, humanCheck, OR clear. No attached document may be omitted.
 Do not group multiple documents under one item — each document gets its own entry.
 
 EXECUTION VERIFICATION RULE — follow this decision tree for every document:
-1. Search for Authentisign ID or DocuSign Envelope ID in the document
-   → If found: document execution is confirmed. Proceed to step 2.
-   → If not found AND no wet signatures visible: flag as MANAGEABLE
-   → If not found AND document completely unreadable: flag as MANAGEABLE (not True Risk)
+1. Search for ANY execution indicator in the document:
+   - Authentisign ID (UUID format after "Authentisign ID:")
+   - DocuSign Envelope ID (UUID format after "Envelope ID:" or "DocuSign Envelope ID:")
+   - Any "/ds/" link or docusign.net reference
+   - zipForm or DotLoop signature certificate
+   - Wet signature with typed name and date
+   - Any "Signed by [name]" with timestamp
+   → If ANY indicator found: document execution is confirmed. Proceed to step 2.
+   → If NO indicator found after thorough search: flag as MANAGEABLE — requires manual verification
+   → Never flag as TRUE RISK solely because execution cannot be verified
 
 2. With Authentisign ID confirmed — search every page for blank signature or initial blocks:
    → If all signature/initial blocks appear completed: add to CLEAR
@@ -981,13 +987,27 @@ EXECUTION VERIFICATION RULE — follow this decision tree for every document:
 
 3. Document completely absent from the folder: TRUE RISK only
 
+SIGNATURE PLATFORM RECOGNITION:
+Real estate transactions use multiple signature platforms. Recognize ALL of these as valid execution confirmation:
+  - Authentisign: look for "Authentisign ID:" followed by a UUID (e.g. 73C06091-DE39-F111-8EF2-000D3A55CAFE)
+  - DocuSign: look for "DocuSign Envelope ID:" or "Envelope ID:" followed by a UUID
+  - DocuSign: look for "/ds/" or "docusign.net" in any embedded link or reference
+  - DocuSign: look for "Signed by [name]" with a DocuSign certificate reference
+  - zipForm / DotLoop: look for "Signed" with a timestamp and party name
+  - Wet signature: look for a signature image with a typed name and date below it
+  - Any digital certificate or envelope ID from any platform counts as execution confirmation
+
+If ANY of these indicators are present, the document is CONFIRMED EXECUTED.
+Only flag as unverifiable if the document is completely blank or has NO signature indicators of any kind.
+
 PAGE-LEVEL SEARCH INSTRUCTION:
 For each document, use file_search to find:
-  - The Authentisign ID or DocuSign Envelope ID (usually on last page or header)
+  - ANY signature platform ID (Authentisign, DocuSign, zipForm, DotLoop, or other)
   - Party names and property address
   - Any signature blocks that appear blank (look for lines with no name above them)
   - Any initial boxes that appear empty (look for □ or blank ___ near party name fields)
 Report the specific page number or section where any issue is found.
+When citing evidence, use whatever ID or signature indicator was found — not just Authentisign.
 
 {
   "summary": "2-3 sentence assessment of THIS batch only. Name specific documents reviewed. Call out any findings.",
