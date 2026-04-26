@@ -355,7 +355,7 @@ exports.handler = async (event) => {
 
     // Process files in small groups of 5 for efficiency
     // Groups of 5 are reliable and fast — no vector stores needed
-    const GROUP_SIZE = 5;
+    const GROUP_SIZE = 3; // Smaller groups = fewer tokens per call
     const groups = [];
     for (let i = 0; i < readFiles.length; i += GROUP_SIZE) {
       groups.push(readFiles.slice(i, i + GROUP_SIZE));
@@ -369,7 +369,8 @@ exports.handler = async (event) => {
       console.log(`[AUDIT] ${groupLabel}: ${group.map(f => f.filename).join(', ')}`);
 
       // Small pause between groups (not first)
-      if (g > 0) await new Promise(r => setTimeout(r, 3000));
+      // 15s pause between groups to stay under 30k token/min rate limit
+      if (g > 0) await new Promise(r => setTimeout(r, 15000));
 
       try {
         const groupFindings = await processFileGroup(
