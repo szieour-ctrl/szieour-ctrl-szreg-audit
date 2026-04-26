@@ -409,14 +409,19 @@ exports.handler = async (event) => {
     if (allFindings.trueRisk.length > 0) overallRisk = 'HIGH';
     else if (allFindings.manageable.length > 0 || allFindings.humanCheck.length > 0) overallRisk = 'MEDIUM';
 
-    // Deduplicate cross-reference findings
-    const seenChecks = new Set();
-    const dedupedXref = allFindings.crossReferenceFindings.filter(c => {
-      const key = (c.check || '').toLowerCase().trim();
-      if (seenChecks.has(key)) return false;
-      seenChecks.add(key);
-      return true;
-    });
+    // Reconcile cross-reference findings — PASS wins over FAIL or UNABLE TO VERIFY.
+    // Groups fire cross-refs with partial doc visibility; a later group may PASS the same
+    // check an earlier group FAILed. Merge by topic keyword, keep the best result.
+    const xrefByTopic = new Map();
+    const resultRank = { PASS: 2, FAIL: 1, 'UNABLE TO VERIFY': 0 };
+    for (const c of allFindings.crossReferenceFindings) {
+      const topic = (c.check || '').toLowerCase().trim().split(/\s+/).slice(0, 4).join(' ');
+      const existing = xrefByTopic.get(topic);
+      const thisRank = resultRank[c.result] ?? 0;
+      const existingRank = existing ? (resultRank[existing.result] ?? 0) : -1;
+      if (!existing || thisRank > existingRank) xrefByTopic.set(topic, c);
+    }
+    const dedupedXref = Array.from(xrefByTopic.values());
 
     const trueRiskItems = allFindings.trueRisk.length > 0
       ? allFindings.trueRisk.map(r => r.item).join(', ')
