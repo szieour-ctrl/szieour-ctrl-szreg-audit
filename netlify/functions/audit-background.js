@@ -426,6 +426,12 @@ async function callOpenAI(folderName, conditions, readFiles, inventoryFiles, sub
     const batchDocs = batch.map(f => f.doc);
     const batchPrompt = buildPrompt(folderName, conditions, submittedBy, batchDocs, b === 0 ? inventoryFiles : [], b, batches.length);
 
+    // Pause between batches to avoid OpenAI rate limits
+    if (b > 0) {
+      console.log(`[OPENAI] Pausing 10s before ${batchLabel}...`);
+      await new Promise(r => setTimeout(r, 10000));
+    }
+
     try {
       // Create vector store for this batch's files
       const vectorStoreId = await createVectorStore(batchFileIds, apiKey);
