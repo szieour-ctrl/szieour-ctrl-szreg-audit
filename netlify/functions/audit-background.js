@@ -353,9 +353,21 @@ exports.handler = async (event) => {
     const apiKey = process.env.OPENAI_API_KEY;
     const allFilenames = allFiles.map(f => f.filename);
 
-    // Process files in small groups of 5 for efficiency
-    // Groups of 5 are reliable and fast — no vector stores needed
-    const GROUP_SIZE = 3; // Smaller groups = fewer tokens per call
+    // Priority sort: RPA and Commission Demand must land in the same group
+    // so the cross-reference commission % check can always run.
+    // Priority 0 = pinned to Group 1. Priority 1 = everything else (stable sort).
+    const PRIORITY_PATTERNS = [
+      /executed.?contract/i, /\brpa\b/i, /purchase.?agree/i,
+      /commission.?demand/i, /szreg.?commission/i
+    ];
+    readFiles.sort((a, b) => {
+      const pa = PRIORITY_PATTERNS.some(p => p.test(a.filename)) ? 0 : 1;
+      const pb = PRIORITY_PATTERNS.some(p => p.test(b.filename)) ? 0 : 1;
+      return pa - pb;
+    });
+
+    // Process files in small groups of 3 for Claude PDF token budget
+    const GROUP_SIZE = 3;
     const groups = [];
     for (let i = 0; i < readFiles.length; i += GROUP_SIZE) {
       groups.push(readFiles.slice(i, i + GROUP_SIZE));
@@ -435,13 +447,30 @@ exports.handler = async (event) => {
     };
 
     // ── Fire Pabbly ───────────────────────────────────────────────────────────
+    const overallRiskLabel = { HIGH: 'HIGH RISK — Action Required', MEDIUM: 'MEDIUM RISK — Review Items', LOW: 'LOW RISK — File Appears Complete' };
+
     await postJSON(PABBLY_WEBHOOK_URL, {
       status: 'complete',
       folderName: txFolder.name,
       folderId: txFolder.id,
-      submittedBy, agentEmail, auditDate, transactionType, conditions,
-      readCount: readFiles.length,
-      inventoryCount: inventoryFiles.length,
+      // Phase 5E Gmail fields — surfaced at top level for easy Pabbly mapping
+      agentEmail,                      // recipient for Gmail step
+      submittedBy,                     // "Audited by" line in email
+      auditDate,
+      transactionType,
+      overallRisk: mergedReport.overallRisk,
+      overallRiskLabel: overallRiskLabel[mergedReport.overallRisk] || mergedReport.overallRisk,
+      riskCounts,                      // e.g. "0 True Risk, 0 Manageable, 0 Human Check, 26 Clear"
+      trueRiskCount:   mergedReport.trueRisk.length,
+      manageableCount: mergedReport.manageable.length,
+      humanCheckCount: mergedReport.humanCheck.length,
+      clearCount:      mergedReport.clear.length,
+      readCount:       readFiles.length,
+      inventoryCount:  inventoryFiles.length,
+      // Google Doc URL — Pabbly Step 2 creates the Doc and returns its URL;
+      // pass folderId so Pabbly can build the Drive folder link for the email
+      googleDriveFolderUrl: `https://drive.google.com/drive/folders/${txFolder.id}`,
+      conditions,
       report: mergedReport,
       reportFormatted: formatReport(txFolder.name, mergedReport, submittedBy, auditDate, conditions, readFiles.length, inventoryFiles.length, readFiles, inventoryFiles),
       reportHTML: formatReportHTML(txFolder.name, mergedReport, submittedBy, auditDate, conditions, readFiles.length, inventoryFiles.length, readFiles, inventoryFiles)
