@@ -232,21 +232,18 @@ exports.handler = async (event) => {
     submittedBy, agentEmail, auditDate
   } = body;
 
-  console.log(`[AUDIT] Starting compliance audit for: ${lastNameSearch}`);
+  console.log(`[AUDIT] Starting two-phase compliance audit for: ${lastNameSearch}`);
 
   try {
-    // ── 1. Authenticate ───────────────────────────────────────────────────────
     const token = await getGoogleAccessToken();
     console.log('[AUDIT] Google auth OK');
 
-    // ── 2. Find transaction folder ────────────────────────────────────────────
+    // Find transaction folder
     const typeKeyword = transactionType === 'BUYER' ? 'Buyer' : 'Listing';
     const q = encodeURIComponent(
       `'${RE_TRANSACTIONS_FOLDER}' in parents and name contains '${lastNameSearch}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
     );
-    const searchResult = await driveRequest(
-      `/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=10`, token
-    );
+    const searchResult = await driveRequest(`/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=10`, token);
     const folders = searchResult.files || [];
     if (!folders.length) {
       await postJSON(PABBLY_WEBHOOK_URL, { status: 'error', error: `No folder found for "${lastNameSearch}"`, submittedBy, agentEmail, auditDate });
@@ -255,13 +252,13 @@ exports.handler = async (event) => {
     const txFolder = folders.find(f => f.name.includes(typeKeyword)) || folders[0];
     console.log(`[AUDIT] Folder: ${txFolder.name}`);
 
-    // ── 3. Navigate to Executed Docs ──────────────────────────────────────────
+    // Navigate to Executed Docs
     const parentContents = await listFolderContents(txFolder.id, token);
     const activeTransaction = parentContents.find(f =>
       f.name.includes('Active Transaction') && f.mimeType === 'application/vnd.google-apps.folder'
     );
     if (!activeTransaction) {
-      await postJSON(PABBLY_WEBHOOK_URL, { status: 'error', error: `Active Transaction folder not found in ${txFolder.name}`, folderName: txFolder.name, submittedBy, agentEmail, auditDate });
+      await postJSON(PABBLY_WEBHOOK_URL, { status: 'error', error: `Active Transaction folder not found`, folderName: txFolder.name, submittedBy, agentEmail, auditDate });
       return { statusCode: 202 };
     }
     const atContents = await listFolderContents(activeTransaction.id, token);
@@ -269,68 +266,46 @@ exports.handler = async (event) => {
       f.name.includes('Executed Docs') && f.mimeType === 'application/vnd.google-apps.folder'
     );
     if (!execDocs) {
-      await postJSON(PABBLY_WEBHOOK_URL, { status: 'error', error: `Executed Docs folder not found — has Offer Accepted been run?`, folderName: txFolder.name, submittedBy, agentEmail, auditDate });
+      await postJSON(PABBLY_WEBHOOK_URL, { status: 'error', error: `Executed Docs folder not found`, folderName: txFolder.name, submittedBy, agentEmail, auditDate });
       return { statusCode: 202 };
     }
 
-    // ── 4. Inventory all files, classify each one ─────────────────────────────
+    // Inventory all subfolders and classify every file
     const eSubfolders = await listFolderContents(execDocs.id, token);
-    const allFiles = []; // { folder, filename, fileId, sizeKB, classification }
+    const phase1Files = []; // E1 + E2 — Contracts & Disclosures
+    const phase2Files = []; // E3 + E4 + E5 — Inspections, Title, HOA
 
     for (const subfolder of eSubfolders) {
       if (subfolder.mimeType !== 'application/vnd.google-apps.folder') continue;
       const files = await listFolderContents(subfolder.id, token);
-      console.log(`[AUDIT] ${subfolder.name}: ${files.length} files`);
+      const fn = subfolder.name.toLowerCase();
+      // Phase 1: E1 and E2 folders (contracts, disclosures, addendums, RFR)
+      const isPhase1 = fn.includes('e1') || fn.includes('e2') ||
+                       fn.includes('contract') || fn.includes('disclosure') ||
+                       fn.includes('addendum') || fn.includes('rfr');
+      console.log(`[AUDIT] ${subfolder.name} (${isPhase1 ? 'Phase 1' : 'Phase 2'}): ${files.length} files`);
       for (const file of files) {
         if (file.mimeType === 'application/vnd.google-apps.folder') continue;
         const isPDF = file.mimeType === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
         if (!isPDF) continue;
         const sizeKB = parseInt(file.size || 0) / 1024;
-        const classification = classifyFile(file.name, sizeKB);
-        allFiles.push({
+        const fileObj = {
           folder: subfolder.name,
           filename: file.name,
           fileId: file.id,
           sizeKB: Math.round(sizeKB),
-          classification
-        });
-        console.log(`[AUDIT] ${classification}: ${file.name} (${Math.round(sizeKB)}KB)`);
+          classification: classifyFile(file.name, sizeKB)
+        };
+        console.log(`[AUDIT] ${fileObj.classification}: ${file.name} (${Math.round(sizeKB)}KB)`);
+        if (isPhase1) phase1Files.push(fileObj);
+        else phase2Files.push(fileObj);
       }
     }
 
-    // ── 5. Download READ-classified files ─────────────────────────────────────
-    let totalReadKB = 0;
-    for (const file of allFiles) {
-      if (file.classification !== 'READ') continue;
-      if (file.sizeKB > PER_FILE_CAP_KB) {
-        file.classification = 'INVENTORY';
-        file.skipReason = `File is ${file.sizeKB}KB — exceeds ${PER_FILE_CAP_KB}KB per-file limit. Reclassified to inventory.`;
-        continue;
-      }
-      if (totalReadKB + file.sizeKB > TOTAL_READ_CAP_KB) {
-        file.classification = 'INVENTORY';
-        file.skipReason = 'Total read payload cap reached. Reclassified to inventory.';
-        continue;
-      }
-      try {
-        file.base64 = await downloadFileAsBase64(file.fileId, token);
-        totalReadKB += file.sizeKB;
-        console.log(`[AUDIT] Downloaded: ${file.filename} (${file.sizeKB}KB) — running total: ${Math.round(totalReadKB)}KB`);
-      } catch (err) {
-        file.classification = 'INVENTORY';
-        file.skipReason = `Download failed: ${err.message}`;
-        console.error(`[AUDIT] Download failed: ${file.filename}`, err.message);
-      }
-    }
+    console.log(`[AUDIT] Phase 1 (E1+E2): ${phase1Files.length} files | Phase 2 (E3+E4+E5): ${phase2Files.length} files`);
 
-    const readFiles = allFiles.filter(f => f.classification === 'READ' && f.base64);
-    const inventoryFiles = allFiles.filter(f => f.classification === 'INVENTORY');
-    console.log(`[AUDIT] READ: ${readFiles.length} files (${Math.round(totalReadKB)}KB) | INVENTORY: ${inventoryFiles.length} files`);
-
-    // ── 6. Build conditions object ────────────────────────────────────────────
     const conditions = {
-      transactionType,
-      yearBuilt,
+      transactionType, yearBuilt,
       isPreX1978: yearBuilt && parseInt(yearBuilt) < 1978,
       hoaPresent: hoaPresent === 'yes',
       poolPresent: poolPresent === 'yes',
@@ -338,35 +313,38 @@ exports.handler = async (event) => {
       community55plus: community55plus === 'yes'
     };
 
-    // ── 7. Call OpenAI with read files + inventory list ───────────────────────
-    const auditReport = await callOpenAI(txFolder.name, conditions, readFiles, inventoryFiles, submittedBy);
-    console.log('[AUDIT] OpenAI analysis complete');
+    // Phase 1 — Contracts & Disclosures
+    console.log('[AUDIT] === PHASE 1: Contracts & Disclosures ===');
+    const { readFiles: p1Read, inventoryFiles: p1Inventory } = await downloadPhaseFiles(phase1Files, token);
+    const phase1Report = await runPhaseAudit(txFolder.name, conditions, p1Read, p1Inventory, submittedBy, 1);
+    console.log('[AUDIT] Phase 1 complete');
 
-    // ── 8. Build inventory summary ────────────────────────────────────────────
-    const inventorySummary = [
-      `READ & AUDITED (${readFiles.length} files):`,
-      ...readFiles.map(f => `  ✅ [${f.folder}] ${f.filename} (${f.sizeKB}KB)`),
-      '',
-      `INVENTORY ONLY (${inventoryFiles.length} files):`,
-      ...inventoryFiles.map(f => `  📋 [${f.folder}] ${f.filename} (${f.sizeKB}KB)${f.skipReason ? ' — ' + f.skipReason : ''}`)
-    ].join('\n');
+    // Pause between phases
+    console.log('[AUDIT] Pausing 25s before Phase 2...');
+    await new Promise(r => setTimeout(r, 25000));
 
-    // ── 9. Fire Pabbly ────────────────────────────────────────────────────────
+    // Phase 2 — Inspections, Title & HOA
+    console.log('[AUDIT] === PHASE 2: Inspections, Title & HOA ===');
+    const { readFiles: p2Read, inventoryFiles: p2Inventory } = await downloadPhaseFiles(phase2Files, token);
+    const phase2Report = await runPhaseAudit(txFolder.name, conditions, p2Read, p2Inventory, submittedBy, 2);
+    console.log('[AUDIT] Phase 2 complete');
+
+    // Merge both phase reports into one
+    const allReadFiles      = [...p1Read, ...p2Read];
+    const allInventoryFiles = [...p1Inventory, ...p2Inventory];
+    const mergedReport = mergeBatchResults([phase1Report, phase2Report]);
+
+    // Fire Pabbly with combined report
     await postJSON(PABBLY_WEBHOOK_URL, {
       status: 'complete',
       folderName: txFolder.name,
       folderId: txFolder.id,
-      submittedBy,
-      agentEmail,
-      auditDate,
-      transactionType,
-      conditions,
-      inventorySummary,
-      readCount: readFiles.length,
-      inventoryCount: inventoryFiles.length,
-      report: auditReport,
-      reportFormatted: formatReport(txFolder.name, auditReport, submittedBy, auditDate, conditions, readFiles.length, inventoryFiles.length, readFiles, inventoryFiles),
-      reportHTML: formatReportHTML(txFolder.name, auditReport, submittedBy, auditDate, conditions, readFiles.length, inventoryFiles.length, readFiles, inventoryFiles)
+      submittedBy, agentEmail, auditDate, transactionType, conditions,
+      readCount: allReadFiles.length,
+      inventoryCount: allInventoryFiles.length,
+      report: mergedReport,
+      reportFormatted: formatReport(txFolder.name, mergedReport, submittedBy, auditDate, conditions, allReadFiles.length, allInventoryFiles.length, allReadFiles, allInventoryFiles),
+      reportHTML:      formatReportHTML(txFolder.name, mergedReport, submittedBy, auditDate, conditions, allReadFiles.length, allInventoryFiles.length, allReadFiles, allInventoryFiles)
     });
 
     console.log('[AUDIT] Pabbly webhook fired — done');
@@ -375,205 +353,130 @@ exports.handler = async (event) => {
   } catch (err) {
     console.error('[AUDIT] Fatal error:', err.message);
     try {
-      await postJSON(PABBLY_WEBHOOK_URL, {
-        status: 'error',
-        error: err.message,
-        submittedBy, agentEmail, auditDate,
-        folderName: lastNameSearch
-      });
+      await postJSON(PABBLY_WEBHOOK_URL, { status: 'error', error: err.message, submittedBy, agentEmail, auditDate, folderName: lastNameSearch });
     } catch (e) { console.error('[AUDIT] Webhook error notify failed:', e.message); }
     return { statusCode: 202 };
   }
 };
 
-// ─── OpenAI Assistants API call ──────────────────────────────────────────────
+// ─── Download files for a phase ───────────────────────────────────────────────
 
-async function callOpenAI(folderName, conditions, readFiles, inventoryFiles, submittedBy) {
+async function downloadPhaseFiles(phaseFiles, token) {
+  const readFiles = [];
+  const inventoryFiles = [];
+  let totalReadKB = 0;
+
+  for (const file of phaseFiles) {
+    if (file.classification === 'INVENTORY') {
+      inventoryFiles.push(file);
+      continue;
+    }
+    if (file.sizeKB > PER_FILE_CAP_KB) {
+      file.skipReason = `Exceeds ${PER_FILE_CAP_KB}KB per-file limit.`;
+      inventoryFiles.push(file);
+      continue;
+    }
+    if (totalReadKB + file.sizeKB > TOTAL_READ_CAP_KB) {
+      file.skipReason = 'Total read cap reached.';
+      inventoryFiles.push(file);
+      continue;
+    }
+    try {
+      file.base64 = await downloadFileAsBase64(file.fileId, token);
+      totalReadKB += file.sizeKB;
+      readFiles.push(file);
+      console.log(`[AUDIT] Downloaded: ${file.filename} (${file.sizeKB}KB)`);
+    } catch (err) {
+      file.skipReason = `Download failed: ${err.message}`;
+      inventoryFiles.push(file);
+    }
+  }
+
+  console.log(`[AUDIT] Downloaded ${readFiles.length} files (${Math.round(totalReadKB)}KB) | ${inventoryFiles.length} inventory`);
+  return { readFiles, inventoryFiles };
+}
+
+// ─── Run one phase audit — one vector store, one assistant, one run ───────────
+
+async function runPhaseAudit(folderName, conditions, readFiles, inventoryFiles, submittedBy, phaseNumber) {
   const apiKey = process.env.OPENAI_API_KEY;
-  const MAX_ATTACHMENTS = 10; // OpenAI Assistants API limit per message
+  const phaseLabel = phaseNumber === 1 ? 'Contracts & Disclosures' : 'Inspections, Title & HOA';
 
-  // ── Step 1: Upload all PDFs to OpenAI Files API ──────────────────────
+  if (readFiles.length === 0) {
+    console.log(`[OPENAI] Phase ${phaseNumber}: no readable files`);
+    return {
+      summary: `Phase ${phaseNumber} (${phaseLabel}): ${inventoryFiles.length} documents confirmed present by filename.`,
+      overallRisk: 'LOW', trueRisk: [], manageable: [], humanCheck: [], clear: [],
+      inventoryConfirmed: inventoryFiles.map(f => ({ item: f.filename, detail: 'Present by filename — not read', folder: f.folder })),
+      crossReferenceFindings: [],
+      disclaimer: 'Agent review required before COE.'
+    };
+  }
+
+  // Upload all files
   const fileIds = [];
   for (const doc of readFiles) {
     try {
       const fileId = await uploadFileToOpenAI(doc, apiKey);
       fileIds.push({ fileId, doc });
-      console.log(`[OPENAI] Uploaded: ${doc.filename} → ${fileId}`);
+      console.log(`[OPENAI] P${phaseNumber} uploaded: ${doc.filename}`);
     } catch (err) {
-      console.error(`[OPENAI] Upload failed for ${doc.filename}:`, err.message);
+      console.error(`[OPENAI] P${phaseNumber} upload failed: ${doc.filename}`, err.message);
       inventoryFiles.push({ ...doc, skipReason: 'Upload failed: ' + err.message });
     }
   }
-  console.log(`[OPENAI] ${fileIds.length} files uploaded`);
 
-  // ── Step 2: Batch into chunks of 10 ──────────────────────────────────
-  const batches = [];
-  for (let i = 0; i < fileIds.length; i += MAX_ATTACHMENTS) {
-    batches.push(fileIds.slice(i, i + MAX_ATTACHMENTS));
-  }
-  console.log(`[OPENAI] Processing ${batches.length} batch(es) of up to ${MAX_ATTACHMENTS} files each`);
+  // Create one vector store for all files in this phase
+  const allFileIds = fileIds.map(f => f.fileId);
+  console.log(`[OPENAI] P${phaseNumber}: creating vector store (${allFileIds.length} files)`);
+  const vectorStoreId = await createVectorStore(allFileIds, apiKey);
+  console.log(`[OPENAI] P${phaseNumber} vector store ready: ${vectorStoreId}`);
 
-  // ── Step 3: Run each batch with its own Assistant + vector store ────────
-  const batchResults = [];
-  const assistantIds = []; // track for cleanup
+  // Create assistant with vector store
+  const assistantId = await createAssistantWithVectorStore(vectorStoreId, apiKey);
+  console.log(`[OPENAI] P${phaseNumber} assistant: ${assistantId}`);
 
-  for (let b = 0; b < batches.length; b++) {
-    const batch = batches[b];
-    const batchLabel = `Batch ${b + 1} of ${batches.length}`;
-    console.log(`[OPENAI] ${batchLabel}: ${batch.length} files`);
+  // Build prompt and run
+  const phaseDocs = fileIds.map(f => f.doc);
+  const prompt = buildPrompt(folderName, conditions, submittedBy, phaseDocs, inventoryFiles, 0, 1);
+  const threadId = await createThread(apiKey);
+  await addMessageToThread(threadId, prompt, [], apiKey);
+  const runId = await runAssistant(assistantId, threadId, apiKey);
+  const runResult = await pollForCompletion(threadId, runId, apiKey);
 
-    const batchFileIds = batch.map(f => f.fileId);
-    const batchDocs = batch.map(f => f.doc);
-    const batchPrompt = buildPrompt(folderName, conditions, submittedBy, batchDocs, b === 0 ? inventoryFiles : [], b, batches.length);
+  // Cleanup
+  for (const { fileId } of fileIds) { try { await deleteFile(fileId, apiKey); } catch(e){} }
+  try { await deleteAssistant(assistantId, apiKey); } catch(e) {}
+  try { await deleteVectorStore(vectorStoreId, apiKey); } catch(e) {}
 
-    // Pause between batches to avoid OpenAI rate limits
-    if (b > 0) {
-      console.log(`[OPENAI] Pausing 10s before ${batchLabel}...`);
-      await new Promise(r => setTimeout(r, 10000));
-    }
-
-    try {
-      // Create vector store for this batch's files
-      const vectorStoreId = await createVectorStore(batchFileIds, apiKey);
-      console.log(`[OPENAI] ${batchLabel} vector store: ${vectorStoreId}`);
-
-      // Create fresh Assistant with this vector store attached
-      const assistantId = await createAssistantWithVectorStore(vectorStoreId, apiKey);
-      assistantIds.push({ assistantId, vectorStoreId });
-      console.log(`[OPENAI] ${batchLabel} assistant: ${assistantId}`);
-
-      // Create thread and run
-      const threadId = await createThread(apiKey);
-      await addMessageToThread(threadId, batchPrompt, [], apiKey);
-      const runId = await runAssistant(assistantId, threadId, apiKey);
-      const runResult = await pollForCompletion(threadId, runId, apiKey);
-
-      if (runResult.status !== 'completed') {
-        console.error(`[OPENAI] ${batchLabel} failed: ${runResult.status}`, JSON.stringify(runResult.last_error || ''));
-        batchResults.push(errorReport(`${batchLabel} did not complete: ${runResult.status}`));
-        continue;
-      }
-
-      const responseText = await getThreadResponse(threadId, apiKey);
-      console.log(`[OPENAI] ${batchLabel} response length: ${responseText.length}`);
-
-      const clean = responseText
-        .replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-      const jsonStart = clean.indexOf('{');
-      const jsonEnd = clean.lastIndexOf('}');
-      if (jsonStart === -1 || jsonEnd === -1) throw new Error('No JSON found in response');
-      const result = JSON.parse(clean.substring(jsonStart, jsonEnd + 1));
-      result.trueRisk               = result.trueRisk               || [];
-      result.manageable             = result.manageable             || [];
-      result.humanCheck             = result.humanCheck             || [];
-      result.clear                  = result.clear                  || [];
-      result.inventoryConfirmed     = result.inventoryConfirmed     || [];
-      result.crossReferenceFindings = result.crossReferenceFindings || [];
-      result.summary                = result.summary                || '';
-      result.overallRisk            = result.overallRisk            || 'LOW';
-      batchResults.push(result);
-
-    } catch (e) {
-      console.error(`[OPENAI] ${batchLabel} error:`, e.message);
-      batchResults.push(errorReport(`${batchLabel} error: ${e.message}`));
-    }
+  if (runResult.status !== 'completed') {
+    console.error(`[OPENAI] P${phaseNumber} failed: ${runResult.status}`);
+    return errorReport(`Phase ${phaseNumber} (${phaseLabel}) did not complete: ${runResult.status}`);
   }
 
-  // ── Step 5: Cleanup ───────────────────────────────────────────────────
-  for (const { fileId } of fileIds) {
-    try { await deleteFile(fileId, apiKey); } catch (e) { /* non-fatal */ }
-  }
-  for (const { assistantId, vectorStoreId } of assistantIds) {
-    try { await deleteAssistant(assistantId, apiKey); } catch (e) { /* non-fatal */ }
-    try { await deleteVectorStore(vectorStoreId, apiKey); } catch (e) { /* non-fatal */ }
-  }
+  const responseText = await getThreadResponse(threadId, apiKey);
+  console.log(`[OPENAI] P${phaseNumber} response: ${responseText.length} chars`);
 
-  // ── Step 6: Merge batch results ───────────────────────────────────────
-  return mergeBatchResults(batchResults);
+  try {
+    const clean = responseText.replace(/^```json\s*/i,'').replace(/^```\s*/i,'').replace(/```\s*$/i,'').trim();
+    const jsonStart = clean.indexOf('{');
+    const jsonEnd   = clean.lastIndexOf('}');
+    if (jsonStart === -1 || jsonEnd === -1) throw new Error('No JSON in response');
+    const result = JSON.parse(clean.substring(jsonStart, jsonEnd + 1));
+    result.trueRisk               = result.trueRisk               || [];
+    result.manageable             = result.manageable             || [];
+    result.humanCheck             = result.humanCheck             || [];
+    result.clear                  = result.clear                  || [];
+    result.inventoryConfirmed     = result.inventoryConfirmed     || [];
+    result.crossReferenceFindings = result.crossReferenceFindings || [];
+    result.summary     = result.summary     || '';
+    result.overallRisk = result.overallRisk || 'LOW';
+    return result;
+  } catch (e) {
+    console.error(`[OPENAI] P${phaseNumber} parse error:`, e.message);
+    return errorReport(`Phase ${phaseNumber} parse error: ${e.message}`);
+  }
 }
-
-function mergeBatchResults(results) {
-  if (!results.length) return errorReport('No batch results returned');
-  if (results.length === 1) {
-    const r = results[0];
-    r.trueRisk               = r.trueRisk               || [];
-    r.manageable             = r.manageable             || [];
-    r.humanCheck             = r.humanCheck             || [];
-    r.clear                  = r.clear                  || [];
-    r.inventoryConfirmed     = r.inventoryConfirmed     || [];
-    r.crossReferenceFindings = r.crossReferenceFindings || [];
-    r.summary                = r.summary                || 'Audit complete.';
-    r.overallRisk            = r.overallRisk            || 'LOW';
-    r.disclaimer             = r.disclaimer             || 'Agent review required before COE.';
-    return r;
-  }
-
-  const merged = {
-    trueRisk: [],
-    manageable: [],
-    humanCheck: [],
-    clear: [],
-    inventoryConfirmed: [],
-    crossReferenceFindings: [],
-    summaries: [],
-    disclaimer: 'This report reflects AI analysis of actual document content (read files) and filename confirmation (inventory files). It does not constitute legal review. Agent verification required before COE. SZ Real Estate Group.'
-  };
-
-  for (const r of results) {
-    if (r.trueRisk)               merged.trueRisk.push(...r.trueRisk);
-    if (r.manageable)             merged.manageable.push(...r.manageable);
-    if (r.humanCheck)             merged.humanCheck.push(...r.humanCheck);
-    if (r.clear)                  merged.clear.push(...r.clear);
-    if (r.inventoryConfirmed)     merged.inventoryConfirmed.push(...r.inventoryConfirmed);
-    if (r.crossReferenceFindings) merged.crossReferenceFindings.push(...r.crossReferenceFindings);
-    if (r.summary)                merged.summaries.push(r.summary);
-  }
-
-  // Overall risk — take highest across batches
-  const riskOrder = { HIGH: 3, MEDIUM: 2, LOW: 1 };
-  const highestRisk = results.reduce((max, r) => {
-    return (riskOrder[r.overallRisk] || 0) > (riskOrder[max] || 0) ? r.overallRisk : max;
-  }, 'LOW');
-
-  merged.overallRisk = highestRisk;
-  // Synthesize summaries into one coherent paragraph
-  if (merged.summaries.length === 1) {
-    merged.summary = merged.summaries[0];
-  } else {
-    // Build a concise merged summary from bullet points of each batch
-    const riskCounts = `${merged.trueRisk.length} True Risk, ${merged.manageable.length} Manageable, ${merged.humanCheck.length} Human Check, ${merged.clear.length} Clear`;
-    const trueRiskItems = merged.trueRisk.length > 0
-      ? merged.trueRisk.map(r => r.item).join(', ')
-      : 'none';
-    const batchSummaryText = merged.summaries.map((s, i) => `Batch ${i+1}: ${s}`).join(' ');
-    merged.summary = `Compliance audit completed for ${merged.summaries.length} document batches. ` +
-      `Results: ${riskCounts}. ` +
-      (merged.trueRisk.length > 0 ? `True Risk items requiring action: ${trueRiskItems}. ` : 'No True Risk items identified. ') +
-      `All inventory-only documents confirmed present by filename. Agent verification required before COE.`;
-  }
-
-  // Deduplicate cross-reference findings by check description
-  const seenChecks = new Set();
-  merged.crossReferenceFindings = merged.crossReferenceFindings.filter(c => {
-    const key = (c.check || '').toLowerCase().trim();
-    if (seenChecks.has(key)) return false;
-    seenChecks.add(key);
-    return true;
-  });
-
-  // Deduplicate clear items by item name
-  const seenClear = new Set();
-  merged.clear = merged.clear.filter(c => {
-    const key = (c.item || '').toLowerCase().trim();
-    if (seenClear.has(key)) return false;
-    seenClear.add(key);
-    return true;
-  });
-
-  return merged;
-}
-
-// ─── OpenAI API helpers ───────────────────────────────────────────────────────
 
 function uploadFileToOpenAI(doc, apiKey) {
   return new Promise((resolve, reject) => {
@@ -656,11 +559,13 @@ async function createVectorStore(fileIds, apiKey) {
 
   // Poll until vector store is ready (files processed)
   let attempts = 0;
-  while (attempts < 30) {
-    await new Promise(r => setTimeout(r, 2000));
+  while (attempts < 60) {
+    await new Promise(r => setTimeout(r, 3000));
     const status = await openAIGet(`/v1/vector_stores/${storeId}`, apiKey);
-    console.log(`[OPENAI] Vector store status: ${status.status} (${status.file_counts?.completed || 0}/${fileIds.length} files)`);
-    if (status.status === 'completed') break;
+    const completed = status.file_counts?.completed || 0;
+    const total = status.file_counts?.total || fileIds.length;
+    console.log(`[OPENAI] Vector store ${storeId}: ${status.status} (${completed}/${total} files)`);
+    if (status.status === 'completed' || completed >= fileIds.length) break;
     if (status.status === 'expired' || status.status === 'failed') {
       throw new Error('Vector store failed: ' + status.status);
     }
@@ -845,6 +750,76 @@ function errorReport(detail) {
     crossReferenceFindings: [],
     disclaimer: 'Audit incomplete — please re-run or contact support.'
   };
+}
+
+
+// ─── Merge two phase reports into one ────────────────────────────────────────
+
+function mergeBatchResults(results) {
+  if (!results.length) return errorReport('No phase results returned');
+  if (results.length === 1) {
+    const r = results[0];
+    r.trueRisk               = r.trueRisk               || [];
+    r.manageable             = r.manageable             || [];
+    r.humanCheck             = r.humanCheck             || [];
+    r.clear                  = r.clear                  || [];
+    r.inventoryConfirmed     = r.inventoryConfirmed     || [];
+    r.crossReferenceFindings = r.crossReferenceFindings || [];
+    r.summary     = r.summary     || 'Audit complete.';
+    r.overallRisk = r.overallRisk || 'LOW';
+    r.disclaimer  = r.disclaimer  || 'Agent review required before COE.';
+    return r;
+  }
+
+  const merged = {
+    trueRisk: [], manageable: [], humanCheck: [], clear: [],
+    inventoryConfirmed: [], crossReferenceFindings: [],
+    summaries: [],
+    disclaimer: 'This report reflects AI analysis of actual document content (read files) and filename confirmation (inventory files). It does not constitute legal review. Agent verification required before COE. SZ Real Estate Group.'
+  };
+
+  for (const r of results) {
+    if (r.trueRisk)               merged.trueRisk.push(...r.trueRisk);
+    if (r.manageable)             merged.manageable.push(...r.manageable);
+    if (r.humanCheck)             merged.humanCheck.push(...r.humanCheck);
+    if (r.clear)                  merged.clear.push(...r.clear);
+    if (r.inventoryConfirmed)     merged.inventoryConfirmed.push(...r.inventoryConfirmed);
+    if (r.crossReferenceFindings) merged.crossReferenceFindings.push(...r.crossReferenceFindings);
+    if (r.summary)                merged.summaries.push(r.summary);
+  }
+
+  // Overall risk — take highest
+  const riskOrder = { HIGH: 3, MEDIUM: 2, LOW: 1 };
+  merged.overallRisk = results.reduce((max, r) =>
+    (riskOrder[r.overallRisk] || 0) > (riskOrder[max] || 0) ? r.overallRisk : max, 'LOW'
+  );
+
+  // Build clean summary
+  const trueRiskItems = merged.trueRisk.length > 0 ? merged.trueRisk.map(r => r.item).join(', ') : 'none';
+  const riskCounts = `${merged.trueRisk.length} True Risk, ${merged.manageable.length} Manageable, ${merged.humanCheck.length} Human Check, ${merged.clear.length} Clear`;
+  merged.summary = `Compliance audit completed across ${results.length} phases (Contracts & Disclosures + Inspections, Title & HOA). Results: ${riskCounts}. ` +
+    (merged.trueRisk.length > 0 ? `True Risk items requiring action: ${trueRiskItems}. ` : 'No True Risk items identified. ') +
+    `All inventory-only documents confirmed present by filename. Agent verification required before COE.`;
+
+  // Deduplicate cross-reference findings
+  const seenChecks = new Set();
+  merged.crossReferenceFindings = merged.crossReferenceFindings.filter(c => {
+    const key = (c.check || '').toLowerCase().trim();
+    if (seenChecks.has(key)) return false;
+    seenChecks.add(key);
+    return true;
+  });
+
+  // Deduplicate clear items
+  const seenClear = new Set();
+  merged.clear = merged.clear.filter(c => {
+    const key = (c.item || '').toLowerCase().trim();
+    if (seenClear.has(key)) return false;
+    seenClear.add(key);
+    return true;
+  });
+
+  return merged;
 }
 
 // ─── Compliance prompt ────────────────────────────────────────────────────────
