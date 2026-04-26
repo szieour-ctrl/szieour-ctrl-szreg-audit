@@ -289,6 +289,11 @@ exports.handler = async (event) => {
         const isPDF = file.mimeType === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
         if (!isPDF) continue;
         const sizeKB = parseInt(file.size || 0) / 1024;
+        // Skip empty files
+        if (Math.round(sizeKB) === 0) {
+          console.log(`[AUDIT] SKIPPED (0KB): ${file.name}`);
+          continue;
+        }
         const fileObj = {
           folder: subfolder.name,
           filename: file.name,
@@ -316,7 +321,8 @@ exports.handler = async (event) => {
     // Phase 1 — Contracts & Disclosures
     console.log('[AUDIT] === PHASE 1: Contracts & Disclosures ===');
     const { readFiles: p1Read, inventoryFiles: p1Inventory } = await downloadPhaseFiles(phase1Files, token);
-    const phase1Report = await runPhaseAudit(txFolder.name, conditions, p1Read, p1Inventory, submittedBy, 1);
+    const p2FileList = phase2Files.map(f => f.filename);
+    const phase1Report = await runPhaseAudit(txFolder.name, conditions, p1Read, p1Inventory, submittedBy, 1, p2FileList);
     console.log('[AUDIT] Phase 1 complete');
 
     // Pause between phases
@@ -326,7 +332,8 @@ exports.handler = async (event) => {
     // Phase 2 — Inspections, Title & HOA
     console.log('[AUDIT] === PHASE 2: Inspections, Title & HOA ===');
     const { readFiles: p2Read, inventoryFiles: p2Inventory } = await downloadPhaseFiles(phase2Files, token);
-    const phase2Report = await runPhaseAudit(txFolder.name, conditions, p2Read, p2Inventory, submittedBy, 2);
+    const p1FileList = phase1Files.map(f => f.filename);
+    const phase2Report = await runPhaseAudit(txFolder.name, conditions, p2Read, p2Inventory, submittedBy, 2, p1FileList);
     console.log('[AUDIT] Phase 2 complete');
 
     // Merge both phase reports into one
@@ -398,7 +405,7 @@ async function downloadPhaseFiles(phaseFiles, token) {
 
 // ─── Run one phase audit — one vector store, one assistant, one run ───────────
 
-async function runPhaseAudit(folderName, conditions, readFiles, inventoryFiles, submittedBy, phaseNumber) {
+async function runPhaseAudit(folderName, conditions, readFiles, inventoryFiles, submittedBy, phaseNumber, otherPhaseFiles = []) {
   const apiKey = process.env.OPENAI_API_KEY;
   const phaseLabel = phaseNumber === 1 ? 'Contracts & Disclosures' : 'Inspections, Title & HOA';
 
@@ -438,7 +445,7 @@ async function runPhaseAudit(folderName, conditions, readFiles, inventoryFiles, 
 
   // Build prompt and run
   const phaseDocs = fileIds.map(f => f.doc);
-  const prompt = buildPrompt(folderName, conditions, submittedBy, phaseDocs, inventoryFiles, 0, 1);
+  const prompt = buildPrompt(folderName, conditions, submittedBy, phaseDocs, inventoryFiles, 0, 1, otherPhaseFiles);
   const threadId = await createThread(apiKey);
   await addMessageToThread(threadId, prompt, [], apiKey);
   const runId = await runAssistant(assistantId, threadId, apiKey);
@@ -824,12 +831,15 @@ function mergeBatchResults(results) {
 
 // ─── Compliance prompt ────────────────────────────────────────────────────────
 
-function buildPrompt(folderName, conditions, submittedBy, readFiles, inventoryFiles, batchIndex = 0, totalBatches = 1) {
+function buildPrompt(folderName, conditions, submittedBy, readFiles, inventoryFiles, batchIndex = 0, totalBatches = 1, otherPhaseFiles = []) {
   const { transactionType, yearBuilt, isPreX1978, hoaPresent, poolPresent, dualAgency, community55plus } = conditions;
   const isBuyer = transactionType === 'BUYER';
 
   const readList = readFiles.map(f => `  • [${f.folder}] ${f.filename} (${f.sizeKB}KB) — ATTACHED, READ THIS DOCUMENT`).join('\n');
   const inventoryList = inventoryFiles.map(f => `  • [${f.folder}] ${f.filename} (${f.sizeKB}KB) — NOT ATTACHED, confirm presence only`).join('\n');
+  const otherPhaseList = otherPhaseFiles.length > 0
+    ? `\nOTHER PHASE DOCUMENTS (handled in separate audit phase — confirmed present, not attached here):\n${otherPhaseFiles.map(f => `  • ${f}`).join('\n')}`
+    : '';
 
   return `SZREG AI COMPLIANCE AUDIT
 Transaction: ${folderName}
@@ -875,6 +885,11 @@ For each attached document:
 
 MODE 2 — INVENTORY CONFIRM (not attached — filename only):
 ${inventoryList || '  (none)'}
+${otherPhaseList}
+
+CROSS-REFERENCE NOTE: Documents listed under "Other Phase" are confirmed present in this
+transaction but audited separately. For cross-reference checks requiring those documents,
+mark PASS if the data is visible in your attached files. Do NOT mark as missing — they exist.
 
 For each inventory-only document:
   • Confirm it is present based on the filename listed
@@ -943,9 +958,13 @@ RATING DEFINITIONS
 OUTPUT — RETURN ONLY THIS JSON, NO OTHER TEXT
 ═══════════════════════════════════════════════════════
 
-MANDATORY RULE: Every single attached document in this batch MUST appear in exactly one of:
-trueRisk, manageable, humanCheck, OR clear. No attached document may be omitted.
-Do not group multiple documents under one item — each document gets its own entry.
+MANDATORY RULE — NON-NEGOTIABLE:
+Every single document listed under MODE 1 (ATTACHED) MUST appear in your JSON output in
+exactly one of: trueRisk, manageable, humanCheck, OR clear.
+Count the MODE 1 documents. Your output must have that exact count across those four arrays combined.
+No document may be omitted. No grouping of multiple documents under one entry.
+If a document is executed with no issues, it goes in clear — do not skip it.
+This rule is absolute. An audit with 19 attached documents must have 19 entries across the four arrays.
 
 EXECUTION VERIFICATION RULE — follow this decision tree for every document:
 1. Search for ANY execution indicator in the document:
