@@ -337,13 +337,17 @@ exports.handler = async (event) => {
       inventoryConfirmed: [], crossReferenceFindings: []
     };
 
-    // Add inventory-only files to findings
+    // Add inventory-only files to findings — track seen for dedup
+    const seenInventory = new Set();
     for (const f of inventoryFiles) {
-      allFindings.inventoryConfirmed.push({
-        item: f.filename,
-        detail: 'Present by filename — not read',
-        folder: f.folder
-      });
+      if (!seenInventory.has(f.filename)) {
+        seenInventory.add(f.filename);
+        allFindings.inventoryConfirmed.push({
+          item: f.filename,
+          detail: 'Present by filename — not read',
+          folder: f.folder
+        });
+      }
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
@@ -376,8 +380,12 @@ exports.handler = async (event) => {
         allFindings.humanCheck.push(...(groupFindings.humanCheck || []));
         allFindings.clear.push(...(groupFindings.clear || []));
         allFindings.crossReferenceFindings.push(...(groupFindings.crossReferenceFindings || []));
-        if (groupFindings.inventoryConfirmed) {
-          allFindings.inventoryConfirmed.push(...groupFindings.inventoryConfirmed);
+        // Only add inventory items from groups if not already tracked (avoid duplicates)
+        for (const item of (groupFindings.inventoryConfirmed || [])) {
+          if (!seenInventory.has(item.item)) {
+            seenInventory.add(item.item);
+            allFindings.inventoryConfirmed.push(item);
+          }
         }
         console.log(`[AUDIT] ${groupLabel} complete: ${groupFindings.clear?.length || 0} clear, ${groupFindings.trueRisk?.length || 0} risk`);
       } catch (err) {
@@ -543,44 +551,69 @@ Type: ${isBuyer ? 'Buyer Representation' : 'Seller Representation'}
 Year Built: ${yearBuilt || 'Not provided'}
 Conditions: Pre-1978=${isPreX1978 ? 'YES' : 'No'} | HOA=${hoaPresent ? 'YES' : 'No'} | Pool=${poolPresent ? 'YES' : 'No'} | Dual Agency=${dualAgency ? 'YES' : 'No'} | 55+=${community55plus ? 'YES' : 'No'}
 
-FILES IN THIS GROUP (attached — read each one):
+FILES IN THIS GROUP — ATTACHED, READ EACH ONE:
 ${fileList}
 
-${inventoryList !== '  (none in this group)' ? `INVENTORY ONLY (not attached — confirm present by filename):\n${inventoryList}` : ''}
+${inventoryFiles.length > 0 ? `INVENTORY ONLY (not attached — confirm present by filename):\n${inventoryList}` : ''}
 ${otherList ? `\n${otherList}` : ''}
 
-SIGNATURE PLATFORM RECOGNITION — accept ALL of these as valid execution:
-- Authentisign ID (UUID after "Authentisign ID:")
-- DocuSign Envelope ID (UUID after "Envelope ID:" or "DocuSign Envelope ID:")
+CRITICAL HONESTY RULE — NON-NEGOTIABLE:
+NEVER invent, fabricate, or guess any data. Specifically:
+- Do NOT make up Authentisign IDs, DocuSign IDs, or UUIDs
+- Do NOT make up party names ("John Doe", "Jane Smith", etc.)
+- Do NOT use placeholders like "UUID_RFR1" or "[UUID]" or "[Buyer Name]"
+- If you cannot find a specific ID or name: write exactly "ID not extracted" or "party names not visible"
+- Only report what you can directly read from the document content
+Fabricated data in a compliance report is a serious error.
+
+SIGNATURE PLATFORM RECOGNITION — accept ALL as valid execution:
+- Authentisign ID: UUID after "Authentisign ID:"
+- DocuSign Envelope ID: UUID after "Envelope ID:" or "DocuSign Envelope ID:"
 - Any /ds/ link or docusign.net reference
 - zipForm or DotLoop certificate
-- Wet signature with typed name and date
+- Wet signature with typed name and date below it
 - "Signed by [name]" with timestamp
 If ANY indicator found → execution confirmed.
 
-MANDATORY: Every attached file MUST appear in exactly one of: trueRisk, manageable, humanCheck, or clear.
-Count: ${files.length} files attached = ${files.length} entries required across those arrays.
+DOCUMENT TYPE RULES:
+- Vendor invoices (PID Invoice, NHD invoice, billing statements): No signature required. Mark CLEAR with note "Vendor invoice — no signature required"
+- Disclosure acknowledgment forms (Earthquake Advisory, WFDA, Disclosure Cover, FIRPTA): Look for initials or acknowledgment mark. If any mark present → CLEAR. If truly blank → MANAGEABLE
+- Commission Demand Letter: Verify commission %, broker name (John P. Klein / SZ Real Estate Group), and any execution indicator
 
 EXECUTION DECISION TREE for each file:
-1. Find any signature platform ID → execution confirmed → go to step 2
-2. Check every page for blank signature/initial blocks:
-   → All complete: add to CLEAR with ID and party names
-   → Any blank page: add to HUMAN CHECK with specific page noted
-3. No signature indicator found at all → MANAGEABLE (not True Risk)
-4. Document completely missing from transaction → TRUE RISK only
+1. Find any signature platform ID or wet signature with typed name
+   → Found: execution confirmed → go to step 2
+   → Not found but document type doesn't require signature (invoice, cover page): mark CLEAR with note
+   → Not found and signature required: mark MANAGEABLE — never True Risk for missing signature alone
+2. With execution confirmed — check for blank signature/initial blocks:
+   → All complete: CLEAR — cite actual ID and actual party names you read
+   → Any blank page found: HUMAN CHECK — cite actual ID and specific page number
 
 STANDALONE FILES SATISFY REQUIREMENTS:
-A standalone LPD.pdf satisfies the LPD requirement. A standalone TDS.pdf satisfies TDS. Do not flag a disclosure as missing if a standalone file exists for it.
+Standalone LPD.pdf satisfies LPD. Standalone TDS.pdf satisfies TDS. Do not flag as missing.
 
-Return ONLY valid JSON — no preamble, no markdown:
+MANDATORY COUNT RULE:
+${files.length} files in this group = exactly ${files.length} entries required across trueRisk + manageable + humanCheck + clear.
+Every file must appear. No omissions. No grouping.
+
+CROSS-REFERENCE CHECKS (only if relevant documents are in this group):
+1. Commission %: Commission Demand % matches RPA?
+2. Party names: Consistent spelling across documents in this group?
+3. Property address: Consistent across this group?
+4. Pest clearance: Any RFR include pest work? Clearance cert present?
+5. Repair amounts: RFR amounts match RRRR seller response?
+Mark UNABLE TO VERIFY only if the document needed for the check is not in this group.
+
+Return ONLY valid JSON — no preamble, no markdown backticks:
 {
-  "trueRisk": [{ "item": "filename", "detail": "finding", "evidence": "specific ID or text", "folder": "E1/E2/E3/E4/E5" }],
-  "manageable": [{ "item": "filename", "detail": "finding", "evidence": "what was found", "folder": "E1/E2/E3/E4/E5" }],
-  "humanCheck": [{ "item": "filename", "detail": "Authentisign ID confirmed but page X has blank block", "evidence": "ID: [id]. Page N: [issue]", "folder": "E1/E2/E3/E4/E5", "risk": "LOW" }],
-  "clear": [{ "item": "filename", "detail": "Authentisign ID confirmed — execution indicators present", "evidence": "ID: [id], party names: [names], address verified", "folder": "E1/E2/E3/E4/E5" }],
-  "inventoryConfirmed": [{ "item": "filename", "detail": "Present by filename — not read", "folder": "E1/E2/E3/E4/E5" }],
-  "crossReferenceFindings": [{ "check": "description", "result": "PASS|FAIL|UNABLE TO VERIFY", "detail": "finding" }]
+  "trueRisk": [{ "item": "exact filename", "detail": "specific finding", "evidence": "exact text read — no fabrication", "folder": "E1/E2/E3/E4/E5" }],
+  "manageable": [{ "item": "exact filename", "detail": "specific finding and action needed", "evidence": "what was actually found or not found", "folder": "E1/E2/E3/E4/E5" }],
+  "humanCheck": [{ "item": "exact filename", "detail": "execution confirmed but page N has blank block", "evidence": "Actual ID: [real ID read from doc]. Page N: [issue]", "folder": "E1/E2/E3/E4/E5", "risk": "LOW" }],
+  "clear": [{ "item": "exact filename", "detail": "Authentisign ID confirmed — execution indicators present", "evidence": "Actual ID: [real ID or 'ID not extracted']. Party names: [actual names or 'not visible']. Address verified.", "folder": "E1/E2/E3/E4/E5" }],
+  "inventoryConfirmed": [{ "item": "exact filename", "detail": "Present by filename — not read", "folder": "E1/E2/E3/E4/E5" }],
+  "crossReferenceFindings": [{ "check": "specific check", "result": "PASS|FAIL|UNABLE TO VERIFY", "detail": "actual finding with real data" }]
 }`;
+
 
   // Call OpenAI Chat Completions with file attachments
   const messageContent = [{ type: 'text', text: prompt }];
