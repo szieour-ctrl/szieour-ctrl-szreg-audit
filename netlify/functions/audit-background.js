@@ -368,9 +368,12 @@ exports.handler = async (event) => {
       const groupLabel = `Group ${g + 1} of ${groups.length}`;
       console.log(`[AUDIT] ${groupLabel}: ${group.map(f => f.filename).join(', ')}`);
 
-      // Small pause between groups (not first)
-      // 15s pause between groups to stay under 30k token/min rate limit
-      if (g > 0) await new Promise(r => setTimeout(r, 15000));
+      // Pause before EVERY group including Group 1 to protect the token bucket.
+      // Group 1: 10s warm-up. Subsequent groups: 60s to allow token refill.
+      // 30k tokens/min limit; large PDFs (FIRPTA, SPQ, TDS) burn 8-12k tokens each.
+      const pauseMs = g === 0 ? 10000 : 60000;
+      console.log(`[AUDIT] ${groupLabel}: pausing ${pauseMs / 1000}s before API call...`);
+      await new Promise(r => setTimeout(r, pauseMs));
 
       try {
         const groupFindings = await processFileGroup(
